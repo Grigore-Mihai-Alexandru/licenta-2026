@@ -1,0 +1,66 @@
+{
+  "input_file": "../models/test.obj",
+  "input_faces": 528849,
+  "input_vertices": 264428,
+  "output_faces": 7987,
+  "output_vertices": 3997,
+  "reduction_pct": 98.49,
+  "total_elapsed_s": 43.6964,
+  "lod_mode": "direct",
+  "stages": [
+    {
+      "lod": 1,
+      "target": 130792,
+      "faces_after": 130780,
+      "vertices_after": 65394,
+      "reduction_pct": 75.27,
+      "elapsed_s": 10.8555,
+      "saved_obj": "D:\\LICENTA\\Project_interface\\assets\\lod_final_lod1.obj",
+      "saved_glb": "D:\\LICENTA\\Project_interface\\assets\\lod_final_lod1.glb"
+    },
+    {
+      "lod": 2,
+      "target": 32346,
+      "faces_after": 32333,
+      "vertices_after": 16170,
+      "reduction_pct": 93.89,
+      "elapsed_s": 11.8955,
+      "saved_obj": "D:\\LICENTA\\Project_interface\\assets\\lod_final_lod2.obj",
+      "saved_glb": "D:\\LICENTA\\Project_interface\\assets\\lod_final_lod2.glb"
+    },
+    {
+      "lod": 3,
+      "target": 8000,
+      "faces_after": 7987,
+      "vertices_after": 3997,
+      "reduction_pct": 98.49,
+      "elapsed_s": 12.4994,
+      "saved_obj": "lod_final.obj",
+      "saved_glb": "lod_final.glb",
+      "saved_stl": null
+    }
+  ],
+  "output_obj": "lod_final.obj",
+  "output_glb": "lod_final.glb",
+  "output_stl": null,
+  "metrics_log": [
+    {
+      "label": "lod_1",
+      "faces": 130780,
+      "vertices": 65394,
+      "elapsed_s": 10.8555
+    },
+    {
+      "label": "lod_2",
+      "faces": 32333,
+      "vertices": 16170,
+      "elapsed_s": 11.8955
+    },
+    {
+      "label": "lod_3",
+      "faces": 7987,
+      "vertices": 3997,
+      "elapsed_s": 12.4994
+    }
+  ]
+}

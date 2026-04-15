@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>3D Model Viewer</title>
+    <style>
+        body { margin: 0; background: #1a1a1a; overflow: hidden; }
+        canvas { display: block; width: 100vw; height: 100vh; }
+    </style>
+    
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "./assets/js/three.module.js",
+                "three/addons/loaders/GLTFLoader.js": "./assets/js/GLTFLoader.js",
+                "three/addons/loaders/OBJLoader.js": "./assets/js/OBJLoader.js",
+                "three/addons/controls/OrbitControls.js": "./assets/js/OrbitControls.js",
+                "three/addons/utils/BufferGeometryUtils.js": "./assets/js/BufferGeometryUtils.js"
+            }
+        }
+    </script>
+</head>
+<body>
+    <script type="module">
+        import * as THREE from 'three';
+        import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+        import { OBJLoader } from 'three/addons/loaders/OBJLoader.js';
+        import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+        console.log("JS: All modules loaded successfully!");
+
+        let scene, camera, renderer, controls, model;
+
+        function init() {
+            try {
+                // Scene setup
+                scene = new THREE.Scene();
+                scene.background = new THREE.Color(0x1a1a1a);
+
+                // Camera setup
+                camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+                camera.position.set(0, 1, 5);
+
+                // Renderer setup
+                renderer = new THREE.WebGLRenderer({ antialias: true });
+                renderer.setSize(window.innerWidth, window.innerHeight);
+                renderer.setPixelRatio(window.devicePixelRatio);
+                document.body.appendChild(renderer.domElement);
+
+                // Lighting
+                const ambientLight = new THREE.AmbientLight(0xffffff, 1.2);
+                scene.add(ambientLight);
+                
+                const dirLight = new THREE.DirectionalLight(0xffffff, 1.0);
+                dirLight.position.set(5, 5, 5);
+                scene.add(dirLight);
+
+                // Controls
+                controls = new OrbitControls(camera, renderer.domElement);
+                controls.enableDamping = true;
+
+                window.addEventListener('resize', onWindowResize, false);
+                
+                animate();
+                console.log("JS: Viewer initialized!");
+            } catch (err) {
+                console.error("JS: Initialization error:", err);
+            }
+        }
+
+        function onWindowResize() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        }
+
+        // --- EXPOSED TO PYTHON ---
+        window.loadModel = function(path) {
+            console.log("JS: Loading model from:", path);
+            
+            // Remove previous model if exists
+            if (model) scene.remove(model);
+
+            const extension = path.split('.').pop().toLowerCase();
+            let loader;
+
+            if (extension === 'glb' || extension === 'gltf') {
+                loader = new GLTFLoader();
+            } else if (extension === 'obj') {
+                loader = new OBJLoader();
+            } else {
+                console.error("JS: Unsupported file format:", extension);
+                return;
+            }
+
+            loader.load(path, (result) => {
+                // GLB stores the model in .scene, OBJ returns the group directly
+                model = result.scene ? result.scene : result;
+                
+                // Automatic centering and scaling
+                const box = new THREE.Box3().setFromObject(model);
+                const center = box.getCenter(new THREE.Vector3());
+                const size = box.getSize(new THREE.Vector3());
+                
+                const maxDim = Math.max(size.x, size.y, size.z);
+                const scale = 3.0 / maxDim; // Adjust scale to fit view
+                model.scale.set(scale, scale, scale);
+                
+                // Offset the position so the model is centered at (0,0,0)
+                model.position.sub(center.multiplyScalar(scale));
+                
+                scene.add(model);
+                console.log("JS: Model rendered successfully!");
+            }, 
+            (xhr) => { 
+                if (xhr.lengthComputable) {
+                    console.log((xhr.loaded / xhr.total * 100) + '% loaded'); 
+                }
+            }, 
+            (err) => { 
+                console.error("JS: Loading error:", err); 
+            });
+        };
+
+        function animate() {
+            requestAnimationFrame(animate);
+            if (controls) controls.update();
+            renderer.render(scene, camera);
+        }
+
+        init();
+    </script>
+</body>
+</html>
