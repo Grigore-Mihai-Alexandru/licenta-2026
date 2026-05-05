@@ -3,133 +3,309 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>3D Model Viewer</title>
+    <title>Neural Forge — 3D Viewer</title>
     <style>
-        body { margin: 0; background: #1a1a1a; overflow: hidden; }
+        *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+        body { background: #06060F; overflow: hidden; font-family: 'Consolas', monospace; }
         canvas { display: block; width: 100vw; height: 100vh; }
-    </style>
-    
-    <script type="importmap">
-        {
-            "imports": {
-                "three": "./assets/js/three.module.js",
-                "three/addons/loaders/GLTFLoader.js": "./assets/js/GLTFLoader.js",
-                "three/addons/loaders/OBJLoader.js": "./assets/js/OBJLoader.js",
-                "three/addons/controls/OrbitControls.js": "./assets/js/OrbitControls.js",
-                "three/addons/utils/BufferGeometryUtils.js": "./assets/js/BufferGeometryUtils.js"
-            }
+
+        /* ── Sidebar ── */
+        #sidebar {
+            position: absolute;
+            top: 12px; left: 12px;
+            display: flex; flex-direction: column; gap: 6px;
+            max-width: 200px;
+            z-index: 10;
         }
+        .model-btn {
+            background: #121220;
+            border: 1px solid #2E2E52;
+            color: #7878A8;
+            padding: 6px 12px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-family: 'Consolas', monospace;
+            font-size: 11px;
+            letter-spacing: 1px;
+            text-align: left;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            transition: border-color 0.15s, color 0.15s, background 0.15s;
+        }
+        .model-btn:hover  { border-color: #B07818; color: #E8A020; background: #E8A02015; }
+        .model-btn.active { border-color: #E8A020; color: #E8A020; background: #E8A02015; }
+
+        /* ── Top-right controls ── */
+        #overlay {
+            position: absolute;
+            top: 12px; right: 12px;
+            display: flex; flex-direction: column; gap: 6px;
+            z-index: 10;
+        }
+        .overlay-btn {
+            background: #121220CC;
+            border: 1px solid #2E2E52;
+            color: #7878A8;
+            padding: 5px 10px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-family: 'Consolas', monospace;
+            font-size: 10px;
+            letter-spacing: 1px;
+            transition: border-color 0.15s, color 0.15s;
+        }
+        .overlay-btn:hover { border-color: #E8A020; color: #E8A020; }
+
+        /* ── Empty state ── */
+        #empty {
+            position: absolute;
+            top: 50%; left: 50%;
+            transform: translate(-50%, -50%);
+            text-align: center;
+            color: #3C3C60;
+            pointer-events: none;
+        }
+        #empty .hex  { font-size: 36px; margin-bottom: 10px; }
+        #empty .main { font-size: 14px; }
+        #empty .sub  { font-size: 11px; color: #1E1E38; margin-top: 6px; }
+
+        /* ── Loading ── */
+        #loader {
+            display: none;
+            position: absolute;
+            top: 50%; left: 50%;
+            transform: translate(-50%, -50%);
+            color: #E8A020;
+            font-size: 11px;
+            letter-spacing: 2px;
+        }
+    </style>
+
+    <script type="importmap">
+    {
+        "imports": {
+            "three":                                      "./assets/js/three.module.js",
+            "three/addons/loaders/GLTFLoader.js":         "./assets/js/GLTFLoader.js",
+            "three/addons/loaders/OBJLoader.js":          "./assets/js/OBJLoader.js",
+            "three/addons/controls/OrbitControls.js":     "./assets/js/OrbitControls.js",
+            "three/addons/utils/BufferGeometryUtils.js":  "./assets/js/BufferGeometryUtils.js"
+        }
+    }
     </script>
 </head>
 <body>
+    <div id="sidebar"></div>
+    <div id="overlay"></div>
+    <div id="empty">
+        <div class="hex">&#x2B21;</div>
+        <div class="main">3D Viewer</div>
+        <div class="sub">No model loaded</div>
+    </div>
+    <div id="loader">LOADING...</div>
+
     <script type="module">
-        import * as THREE from 'three';
-        import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
-        import { OBJLoader } from 'three/addons/loaders/OBJLoader.js';
+        import * as THREE        from 'three';
+        import { GLTFLoader }    from 'three/addons/loaders/GLTFLoader.js';
+        import { OBJLoader }     from 'three/addons/loaders/OBJLoader.js';
         import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 
-        console.log("JS: All modules loaded successfully!");
+        // ── Renderer / Scene / Camera ─────────────────────────────────────
 
-        let scene, camera, renderer, controls, model;
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setPixelRatio(window.devicePixelRatio);
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.setClearColor(0x06060F);
+        renderer.shadowMap.enabled = true;
+        document.body.appendChild(renderer.domElement);
 
-        function init() {
-            try {
-                // Scene setup
-                scene = new THREE.Scene();
-                scene.background = new THREE.Color(0x1a1a1a);
+        const scene  = new THREE.Scene();
+        const camera = new THREE.PerspectiveCamera(
+            45, window.innerWidth / window.innerHeight, 0.001, 5000
+        );
+        camera.position.set(2, 1.5, 3);
 
-                // Camera setup
-                camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
-                camera.position.set(0, 1, 5);
+        const controls = new OrbitControls(camera, renderer.domElement);
+        controls.enableDamping = true;
+        controls.dampingFactor = 0.06;
 
-                // Renderer setup
-                renderer = new THREE.WebGLRenderer({ antialias: true });
-                renderer.setSize(window.innerWidth, window.innerHeight);
-                renderer.setPixelRatio(window.devicePixelRatio);
-                document.body.appendChild(renderer.domElement);
+        // Lighting
+        scene.add(new THREE.AmbientLight(0xffffff, 0.7));
+        const key = new THREE.DirectionalLight(0xffffff, 1.1);
+        key.position.set(5, 10, 5);
+        scene.add(key);
+        const fill = new THREE.DirectionalLight(0xE8A020, 0.3);
+        fill.position.set(-5, 3, -5);
+        scene.add(fill);
 
-                // Lighting
-                const ambientLight = new THREE.AmbientLight(0xffffff, 1.2);
-                scene.add(ambientLight);
-                
-                const dirLight = new THREE.DirectionalLight(0xffffff, 1.0);
-                dirLight.position.set(5, 5, 5);
-                scene.add(dirLight);
+        // Grid
+        const grid = new THREE.GridHelper(20, 40, 0x1E1E38, 0x1E1E38);
+        grid.material.opacity = 0.4;
+        grid.material.transparent = true;
+        scene.add(grid);
 
-                // Controls
-                controls = new OrbitControls(camera, renderer.domElement);
-                controls.enableDamping = true;
+        // ── Model registry ────────────────────────────────────────────────
+        // { key: { label, object3D, visible } }
+        const models = {};
 
-                window.addEventListener('resize', onWindowResize, false);
-                
-                animate();
-                console.log("JS: Viewer initialized!");
-            } catch (err) {
-                console.error("JS: Initialization error:", err);
+        function fitCamera(object) {
+            const box    = new THREE.Box3().setFromObject(object);
+            const center = box.getCenter(new THREE.Vector3());
+            const size   = box.getSize(new THREE.Vector3());
+            const maxDim = Math.max(size.x, size.y, size.z) || 1;
+            const fov    = camera.fov * (Math.PI / 180);
+            const dist   = (maxDim / (2 * Math.tan(fov / 2))) * 1.8;
+
+            controls.target.copy(center);
+            camera.position.set(
+                center.x + dist * 0.7,
+                center.y + dist * 0.5,
+                center.z + dist
+            );
+            camera.near = maxDim * 0.001;
+            camera.far  = maxDim * 500;
+            camera.updateProjectionMatrix();
+            controls.update();
+            grid.position.y = box.min.y;
+        }
+
+        function setVisible(key, visible) {
+            const m = models[key];
+            if (!m) return;
+            m.visible           = visible;
+            m.object3D.visible  = visible;
+            if (visible) fitCamera(m.object3D);
+            refreshUI();
+        }
+
+        function refreshUI() {
+            const sidebar = document.getElementById('sidebar');
+            const overlay = document.getElementById('overlay');
+            sidebar.innerHTML = '';
+            overlay.innerHTML = '';
+
+            const keys = Object.keys(models);
+            document.getElementById('empty').style.display =
+                keys.length === 0 ? 'block' : 'none';
+
+            keys.forEach(key => {
+                const m   = models[key];
+                const btn = document.createElement('button');
+                btn.className   = 'model-btn' + (m.visible ? ' active' : '');
+                btn.textContent = m.label;
+                btn.title       = key;
+                btn.onclick     = () => setVisible(key, !m.visible);
+                sidebar.appendChild(btn);
+            });
+
+            if (keys.length > 1) {
+                const showAll = document.createElement('button');
+                showAll.className   = 'overlay-btn';
+                showAll.textContent = 'SHOW ALL';
+                showAll.onclick     = () => keys.forEach(k => setVisible(k, true));
+                overlay.appendChild(showAll);
+
+                const hideAll = document.createElement('button');
+                hideAll.className   = 'overlay-btn';
+                hideAll.textContent = 'HIDE ALL';
+                hideAll.onclick     = () => keys.forEach(k => setVisible(k, false));
+                overlay.appendChild(hideAll);
             }
         }
 
-        function onWindowResize() {
+        function registerModel(key, label, object3D) {
+            // Give meshes without material a default
+            object3D.traverse(child => {
+                if (child.isMesh && !child.material) {
+                    child.material = new THREE.MeshStandardMaterial(
+                        { color: 0xCCCCCC, roughness: 0.7, metalness: 0.1 }
+                    );
+                }
+                if (child.isMesh) {
+                    child.castShadow    = true;
+                    child.receiveShadow = true;
+                }
+            });
+
+            // Hide other models when a new one arrives
+            Object.values(models).forEach(m => {
+                m.visible          = false;
+                m.object3D.visible = false;
+            });
+
+            models[key] = { label, object3D, visible: true };
+            scene.add(object3D);
+
+            fitCamera(object3D);
+            document.getElementById('loader').style.display = 'none';
+            refreshUI();
+        }
+
+        // ── Loaders ───────────────────────────────────────────────────────
+
+        function loadGLB(key, url, label) {
+            document.getElementById('loader').style.display = 'block';
+            new GLTFLoader().load(
+                url,
+                gltf => registerModel(key, label, gltf.scene),
+                undefined,
+                err  => {
+                    console.error('GLB load error:', err);
+                    document.getElementById('loader').style.display = 'none';
+                }
+            );
+        }
+
+        function loadOBJ(key, url, label) {
+            document.getElementById('loader').style.display = 'block';
+            new OBJLoader().load(
+                url,
+                obj  => registerModel(key, label, obj),
+                undefined,
+                err  => {
+                    console.error('OBJ load error:', err);
+                    document.getElementById('loader').style.display = 'none';
+                }
+            );
+        }
+
+        // ── Public API ────────────────────────────────────────────────────
+
+        window.addModel = function(url, label) {
+            if (!url) return;
+            label     = label || url.split(/[\\/]/).pop();
+            const ext = url.split('.').pop().toLowerCase();
+            if      (ext === 'glb' || ext === 'gltf') loadGLB(url, url, label);
+            else if (ext === 'obj')                    loadOBJ(url, url, label);
+        };
+
+        window.loadModel = function(url, label) {
+            window.clearModels();
+            window.addModel(url, label);
+        };
+
+        window.clearModels = function() {
+            Object.values(models).forEach(m => scene.remove(m.object3D));
+            for (const k in models) delete models[k];
+            refreshUI();
+        };
+
+        // ── Render loop ───────────────────────────────────────────────────
+
+        (function animate() {
+            requestAnimationFrame(animate);
+            controls.update();
+            renderer.render(scene, camera);
+        })();
+
+        window.addEventListener('resize', () => {
             camera.aspect = window.innerWidth / window.innerHeight;
             camera.updateProjectionMatrix();
             renderer.setSize(window.innerWidth, window.innerHeight);
-        }
+        });
 
-        // --- EXPOSED TO PYTHON ---
-        window.loadModel = function(path) {
-            console.log("JS: Loading model from:", path);
-            
-            // Remove previous model if exists
-            if (model) scene.remove(model);
-
-            const extension = path.split('.').pop().toLowerCase();
-            let loader;
-
-            if (extension === 'glb' || extension === 'gltf') {
-                loader = new GLTFLoader();
-            } else if (extension === 'obj') {
-                loader = new OBJLoader();
-            } else {
-                console.error("JS: Unsupported file format:", extension);
-                return;
-            }
-
-            loader.load(path, (result) => {
-                // GLB stores the model in .scene, OBJ returns the group directly
-                model = result.scene ? result.scene : result;
-                
-                // Automatic centering and scaling
-                const box = new THREE.Box3().setFromObject(model);
-                const center = box.getCenter(new THREE.Vector3());
-                const size = box.getSize(new THREE.Vector3());
-                
-                const maxDim = Math.max(size.x, size.y, size.z);
-                const scale = 3.0 / maxDim; // Adjust scale to fit view
-                model.scale.set(scale, scale, scale);
-                
-                // Offset the position so the model is centered at (0,0,0)
-                model.position.sub(center.multiplyScalar(scale));
-                
-                scene.add(model);
-                console.log("JS: Model rendered successfully!");
-            }, 
-            (xhr) => { 
-                if (xhr.lengthComputable) {
-                    console.log((xhr.loaded / xhr.total * 100) + '% loaded'); 
-                }
-            }, 
-            (err) => { 
-                console.error("JS: Loading error:", err); 
-            });
-        };
-
-        function animate() {
-            requestAnimationFrame(animate);
-            if (controls) controls.update();
-            renderer.render(scene, camera);
-        }
-
-        init();
+        refreshUI();
     </script>
 </body>
 </html>

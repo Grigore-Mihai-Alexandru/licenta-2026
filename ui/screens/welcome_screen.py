@@ -7,7 +7,9 @@ from PySide6.QtWidgets import (
     QPushButton, QGraphicsDropShadowEffect
 )
 from PySide6.QtCore import Qt, Signal, QTimer
-from PySide6.QtGui import QFont, QColor, QPainter, QPen, QLinearGradient, QBrush
+from PySide6.QtGui import (
+    QFont, QColor, QPainter, QPen, QLinearGradient, QBrush,
+)
 
 from ui.styles.theme import (
     BG_DEEP, BG_SURFACE, BG_ELEVATED,
@@ -16,10 +18,13 @@ from ui.styles.theme import (
     NEON_GREEN, PURPLE,
     TEXT_PRIMARY, TEXT_SECONDARY, TEXT_MUTED
 )
+from ui.icons import TerminalIcon, CloudUploadIcon
 
+
+# -- Animated background -------------------------------------------------------
 
 class AnimatedBackground(QWidget):
-    """Painted background: dark grid + pulsing cyan nodes."""
+    """Dark grid + slowly drifting amber nodes."""
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -38,76 +43,81 @@ class AnimatedBackground(QWidget):
         p.setRenderHint(QPainter.Antialiasing)
         w, h = self.width(), self.height()
 
-        # Background gradient
         grad = QLinearGradient(0, 0, 0, h)
         grad.setColorAt(0, QColor(BG_DEEP))
-        grad.setColorAt(1, QColor("#0A0F22"))
+        grad.setColorAt(1, QColor("#0A0A15"))
         p.fillRect(0, 0, w, h, grad)
 
         # Grid
-        p.setPen(QPen(QColor(BORDER)))
-        for x in range(0, w, 60):
+        grid_color = QColor(BORDER)
+        grid_color.setAlpha(60)
+        p.setPen(QPen(grid_color, 1))
+        for x in range(0, w, 64):
             p.drawLine(x, 0, x, h)
-        for y in range(0, h, 60):
+        for y in range(0, h, 64):
             p.drawLine(0, y, w, y)
 
-        # Pulsing nodes
+        # Amber drifting nodes
         nodes = [
-            (0.15, 0.2), (0.5, 0.1), (0.85, 0.25),
-            (0.1, 0.7),  (0.9, 0.65), (0.5, 0.9),
-            (0.3, 0.5),  (0.7, 0.45),
+            (0.12, 0.18), (0.5, 0.08), (0.88, 0.22),
+            (0.08, 0.72), (0.92, 0.68), (0.5, 0.92),
+            (0.28, 0.48), (0.72, 0.42),
         ]
         prev = None
         for i, (rx, ry) in enumerate(nodes):
-            t = self._tick * 0.05 + i * 1.2
+            t = self._tick * 0.04 + i * 1.3
             pulse = 0.5 + 0.5 * math.sin(t)
             nx, ny = int(rx * w), int(ry * h)
-            r = int(4 + pulse * 4)
+            r = int(3 + pulse * 5)
             c = QColor(CYAN)
-            c.setAlpha(int(60 + pulse * 120))
+            c.setAlpha(int(40 + pulse * 100))
             p.setPen(Qt.NoPen)
             p.setBrush(QBrush(c))
             p.drawEllipse(nx - r // 2, ny - r // 2, r, r)
             if prev:
                 lc = QColor(CYAN)
-                lc.setAlpha(20)
+                lc.setAlpha(15)
                 p.setPen(QPen(lc, 1))
                 p.drawLine(nx, ny, prev[0], prev[1])
             prev = (nx, ny)
         p.end()
 
 
+# -- Mode card -----------------------------------------------------------------
+
 class ModeCard(QPushButton):
     """Selectable card for Local / Remote mode."""
 
-    def __init__(self, title: str, subtitle: str, icon: str, accent: str, parent=None):
+    def __init__(self, title: str, subtitle: str, icon_widget: QWidget,
+                 accent: str, parent=None):
         super().__init__(parent)
         self.accent = accent
-        self.setFixedSize(350, 250)
+        self._icon_widget = icon_widget
+        self.setFixedSize(340, 260)
         self.setCursor(Qt.PointingHandCursor)
 
         layout = QVBoxLayout(self)
         layout.setAlignment(Qt.AlignCenter)
-        layout.setSpacing(12)
+        layout.setSpacing(14)
         layout.setContentsMargins(24, 24, 24, 24)
 
-        icon_lbl = QLabel(icon)
-        icon_lbl.setAlignment(Qt.AlignCenter)
-        icon_lbl.setFont(QFont("Segoe UI Emoji", 100))
-        icon_lbl.setStyleSheet("background: transparent; border: none; font-size: 100px;")
-        layout.addWidget(icon_lbl)
+        layout.addWidget(icon_widget, alignment=Qt.AlignCenter)
 
         self.title_lbl = QLabel(title)
         self.title_lbl.setAlignment(Qt.AlignCenter)
-        self.title_lbl.setFont(QFont("JetBrains Mono", 17, QFont.Bold))
-        self.title_lbl.setStyleSheet(f"color: {TEXT_PRIMARY}; background: transparent; border: none;")
+        self.title_lbl.setFont(QFont("JetBrains Mono", 16, QFont.Bold))
+        self.title_lbl.setStyleSheet(
+            f"color: {TEXT_PRIMARY}; background: transparent; border: none;"
+        )
         layout.addWidget(self.title_lbl)
 
         sub_lbl = QLabel(subtitle)
         sub_lbl.setAlignment(Qt.AlignCenter)
         sub_lbl.setWordWrap(True)
-        sub_lbl.setFont(QFont("JetBrains Mono", 12))
-        sub_lbl.setStyleSheet(f"color: {TEXT_SECONDARY}; background: transparent; border: none;")
+        sub_lbl.setFont(QFont("JetBrains Mono", 11))
+        sub_lbl.setStyleSheet(
+            f"color: {TEXT_SECONDARY}; background: transparent; border: none;"
+        )
         layout.addWidget(sub_lbl)
 
         self._set_style(False)
@@ -127,19 +137,27 @@ class ModeCard(QPushButton):
     def enterEvent(self, e):
         self._set_style(True)
         sh = QGraphicsDropShadowEffect(self)
-        sh.setBlurRadius(40)
+        sh.setBlurRadius(48)
         sh.setColor(QColor(self.accent))
         sh.setOffset(0, 0)
         self.setGraphicsEffect(sh)
-        self.title_lbl.setStyleSheet(f"color: {self.accent}; background: transparent; border: none;")
+        self.title_lbl.setStyleSheet(
+            f"color: {self.accent}; background: transparent; border: none;"
+        )
+        self._icon_widget.set_color(self.accent)
         super().enterEvent(e)
 
     def leaveEvent(self, e):
         self._set_style(False)
         self.setGraphicsEffect(None)
-        self.title_lbl.setStyleSheet(f"color: {TEXT_PRIMARY}; background: transparent; border: none;")
+        self.title_lbl.setStyleSheet(
+            f"color: {TEXT_PRIMARY}; background: transparent; border: none;"
+        )
+        self._icon_widget.set_color(TEXT_SECONDARY)
         super().leaveEvent(e)
 
+
+# -- Welcome screen ------------------------------------------------------------
 
 class WelcomeScreen(QWidget):
     """
@@ -155,7 +173,6 @@ class WelcomeScreen(QWidget):
         self._build()
 
     def _build(self):
-        # Animated background layer
         self.bg = AnimatedBackground(self)
         self.bg.lower()
 
@@ -164,23 +181,23 @@ class WelcomeScreen(QWidget):
         root.setSpacing(0)
         root.setContentsMargins(60, 40, 60, 60)
 
-        # --- Header ---
+        # Header
         header = QVBoxLayout()
         header.setSpacing(8)
         header.setAlignment(Qt.AlignCenter)
 
-        badge = QLabel("⬡  AI PIPELINE  ⬡")
+        badge = QLabel("AI PIPELINE")
         badge.setAlignment(Qt.AlignCenter)
-        badge.setFont(QFont("JetBrains Mono", 12))
+        badge.setFont(QFont("JetBrains Mono", 11))
         badge.setStyleSheet(f"""
             color: {CYAN};
             background: {CYAN_GLOW};
             border: 1px solid {CYAN_DIM};
             border-radius: 20px;
-            padding: 8px 24px;
-            letter-spacing: 3px;
+            padding: 7px 22px;
+            letter-spacing: 4px;
         """)
-        badge.setFixedWidth(300)
+        badge.setFixedWidth(240)
         header.addWidget(badge, alignment=Qt.AlignCenter)
         header.addSpacing(20)
 
@@ -189,7 +206,7 @@ class WelcomeScreen(QWidget):
         title.setFont(QFont("Orbitron", 48, QFont.Black))
         title.setStyleSheet(f"color: {TEXT_PRIMARY}; letter-spacing: 6px;")
         sh = QGraphicsDropShadowEffect()
-        sh.setBlurRadius(30)
+        sh.setBlurRadius(40)
         sh.setColor(QColor(CYAN))
         sh.setOffset(0, 0)
         title.setGraphicsEffect(sh)
@@ -197,30 +214,30 @@ class WelcomeScreen(QWidget):
 
         subtitle = QLabel("Restormer  ·  Wonder3D  ·  Mesh Optimizer")
         subtitle.setAlignment(Qt.AlignCenter)
-        subtitle.setFont(QFont("JetBrains Mono", 15))
+        subtitle.setFont(QFont("JetBrains Mono", 14))
         subtitle.setStyleSheet(f"color: {TEXT_SECONDARY}; letter-spacing: 2px;")
         header.addWidget(subtitle)
 
         root.addLayout(header)
-        root.addSpacing(60)
+        root.addSpacing(56)
 
-        # --- Mode label ---
         mode_lbl = QLabel("SELECT EXECUTION MODE")
         mode_lbl.setAlignment(Qt.AlignCenter)
-        mode_lbl.setFont(QFont("JetBrains Mono", 13))
+        mode_lbl.setFont(QFont("JetBrains Mono", 12))
         mode_lbl.setStyleSheet(f"color: {TEXT_MUTED}; letter-spacing: 4px;")
         root.addWidget(mode_lbl)
         root.addSpacing(24)
 
-        # --- Cards ---
+        # Cards
         row = QHBoxLayout()
         row.setSpacing(32)
         row.setAlignment(Qt.AlignCenter)
 
+        local_icon = TerminalIcon(size=82, color=TEXT_SECONDARY)
         self.btn_local = ModeCard(
             title="LOCAL",
-            subtitle="Run on your machine\nusing local GPU",
-            icon="🖥️",
+            subtitle="Run on your machine\nusing local GPU via Docker",
+            icon_widget=local_icon,
             accent=NEON_GREEN,
         )
         self.btn_local.clicked.connect(self.local_selected)
@@ -228,14 +245,15 @@ class WelcomeScreen(QWidget):
 
         sep = QLabel("OR")
         sep.setAlignment(Qt.AlignCenter)
-        sep.setFont(QFont("JetBrains Mono", 14, QFont.Bold))
-        sep.setStyleSheet(f"color: {TEXT_MUTED}; letter-spacing: 3px; font-size: 20px;")
+        sep.setFont(QFont("JetBrains Mono", 13, QFont.Bold))
+        sep.setStyleSheet(f"color: {TEXT_MUTED}; letter-spacing: 3px;")
         row.addWidget(sep)
 
+        cloud_icon = CloudUploadIcon(size=82, color=TEXT_SECONDARY)
         self.btn_remote = ModeCard(
             title="GOOGLE CLOUD",
             subtitle="Run remotely via\nGoogle Cloud Platform",
-            icon="☁️",
+            icon_widget=cloud_icon,
             accent=CYAN,
         )
         self.btn_remote.clicked.connect(self.remote_selected)
@@ -246,7 +264,7 @@ class WelcomeScreen(QWidget):
 
         footer = QLabel("v1.0.0  ·  AI 3D Reconstruction Pipeline")
         footer.setAlignment(Qt.AlignCenter)
-        footer.setFont(QFont("JetBrains Mono", 11))
+        footer.setFont(QFont("JetBrains Mono", 10))
         footer.setStyleSheet(f"color: {TEXT_MUTED};")
         root.addWidget(footer)
 

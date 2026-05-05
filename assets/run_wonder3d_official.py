@@ -1,5 +1,4 @@
 # run_wonder3d_official.py — Official Wonder3D_Plus runner (full precision, cloud L4)
-# Drop this in assets/ and it gets copied to /app/Wonder3D/run_colab_official.py
 
 import pyglet
 pyglet.options['headless'] = True

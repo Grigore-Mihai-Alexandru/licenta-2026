@@ -15,13 +15,12 @@ class DriveManager:
         self.service = build("drive", "v3", credentials=creds)
         self._folder_id = None
 
-    # Folder 
+    # Folder
 
     def get_or_create_folder(self) -> str:
         if self._folder_id:
             return self._folder_id
 
-        # Check if folder already exists (created by this app via drive.file scope)
         query = (
             f"name='{FOLDER_NAME}' "
             f"and mimeType='application/vnd.google-apps.folder' "
@@ -48,10 +47,42 @@ class DriveManager:
 
         return self._folder_id
 
+    def get_or_create_job_folder(self, job_name: str) -> str:
+        """Get or create 'Neural Forge/<job_name>/' and return its Drive folder id."""
+        parent_id = self.get_or_create_folder()
+
+        query = (
+            f"name='{job_name}' "
+            f"and mimeType='application/vnd.google-apps.folder' "
+            f"and '{parent_id}' in parents "
+            f"and trashed=false"
+        )
+        results = self.service.files().list(
+            q=query, spaces="drive", fields="files(id, name)"
+        ).execute()
+        files = results.get("files", [])
+
+        if files:
+            folder_id = files[0]["id"]
+            print(f"[DRIVE] Using existing job folder '{job_name}' ({folder_id})")
+        else:
+            metadata = {
+                "name":     job_name,
+                "mimeType": "application/vnd.google-apps.folder",
+                "parents":  [parent_id],
+            }
+            folder = self.service.files().create(body=metadata, fields="id").execute()
+            folder_id = folder["id"]
+            print(f"[DRIVE] Created job folder '{job_name}' ({folder_id})")
+
+        return folder_id
+
     # Upload
 
-    def upload_file(self, local_path: str, progress_callback=None) -> dict:
-        folder_id = self.get_or_create_folder()
+    def upload_file(self, local_path: str, folder_id: str = None,
+                    progress_callback=None) -> dict:
+        if folder_id is None:
+            folder_id = self.get_or_create_folder()
         file_name = os.path.basename(local_path)
         mime_type = _mime_for(local_path)
 
@@ -70,15 +101,28 @@ class DriveManager:
             if status and progress_callback:
                 progress_callback(file_name, int(status.progress() * 100))
 
-        print(f"  ✓ {file_name} → {response.get('webViewLink', '')}")
+        print(f"   {file_name} → {response.get('webViewLink', '')}")
         return response
 
     def upload_results(self, file_paths: list[str], progress_callback=None) -> list[dict]:
-        # Upload only files that exist
         uploaded = []
         for path in file_paths:
             if path and os.path.exists(path):
                 info = self.upload_file(path, progress_callback=progress_callback)
+                uploaded.append(info)
+            else:
+                print(f"[DRIVE] Skipped (not found): {path}")
+        return uploaded
+
+    def upload_results_for_job(self, file_paths: list[str], job_name: str,
+                               progress_callback=None) -> list[dict]:
+        """Upload all result files into 'Neural Forge/<job_name>/'."""
+        folder_id = self.get_or_create_job_folder(job_name)
+        uploaded = []
+        for path in file_paths:
+            if path and os.path.exists(path):
+                info = self.upload_file(path, folder_id=folder_id,
+                                        progress_callback=progress_callback)
                 uploaded.append(info)
             else:
                 print(f"[DRIVE] Skipped (not found): {path}")
@@ -129,10 +173,14 @@ class DriveManager:
         downloaded = self.download_results(uploaded, local_output_dir, progress_callback=progress_callback)
         return downloaded
 
-    # Folder link (for UI "View in Drive" button)
+    # Folder links (for UI "View in Drive" button)
 
     def get_folder_link(self) -> str:
         folder_id = self.get_or_create_folder()
+        return f"https://drive.google.com/drive/folders/{folder_id}"
+
+    def get_job_folder_link(self, job_name: str) -> str:
+        folder_id = self.get_or_create_job_folder(job_name)
         return f"https://drive.google.com/drive/folders/{folder_id}"
 
 

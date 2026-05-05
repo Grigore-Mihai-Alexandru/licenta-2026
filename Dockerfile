@@ -9,12 +9,14 @@ ENV PYOPENGL_PLATFORM=egl
 ENV EGL_PLATFORM=device
 ENV TRANSFORMERS_CACHE=/app/.cache/huggingface
 ENV HF_HOME=/app/.cache/huggingface
+ENV TORCH_EXTENSIONS_DIR=/tmp/torch_extensions
 WORKDIR /app
 
 RUN apt-get update && apt-get install -y \
     software-properties-common wget git build-essential \
     libgl1-mesa-glx libglib2.0-0 \
     libegl1 libopengl0 libegl-mesa0 libosmesa6 libgles2 libgl1-mesa-dri \
+    ninja-build \
     && add-apt-repository ppa:deadsnakes/ppa -y && apt-get update \
     && apt-get install -y python3.7 python3.7-venv python3.7-dev \
     && apt-get install -y python3.10 python3.10-venv python3.10-dev \
@@ -33,18 +35,61 @@ RUN /opt/venv_restormer/bin/pip install --upgrade pip setuptools wheel && \
 RUN git clone https://github.com/swz30/Restormer.git /app/Restormer && \
     cd /app/Restormer && /opt/venv_restormer/bin/python setup.py develop --no_cuda_ext
 
-RUN /opt/venv_restormer/bin/python -c "\
-import os, subprocess; \
-models = { \
-    'Defocus_Deblurring': '1bRBG8DG_72AGA6-eRePvChlT5ZO4cwJ4', \
-    'Denoising':          '1Qwsjyny54RZWa7zC4Apg7exixLBo4uF0', \
-    'Deraining':          '1ZEDDEVW0UgkpWi-N4Lj_JUoVChGXCu_u', \
-    'Motion_Deblurring':  '1czMyfRTQDX3j3ErByYeZ1PM4GVLbJeGK', \
-}; \
-[ (os.makedirs(os.path.join('/app/Restormer', k, 'pretrained_models'), exist_ok=True), \
-   subprocess.run(['/opt/venv_restormer/bin/gdown', '--folder', '--id', v, \
-                   '-O', os.path.join('/app/Restormer', k, 'pretrained_models'), '--fuzzy'])) \
-  for k, v in models.items() ]"
+RUN mkdir -p \
+        /app/Restormer/Denoising/pretrained_models \
+        /app/Restormer/Motion_Deblurring/pretrained_models \
+        /app/Restormer/Deraining/pretrained_models \
+        /app/Restormer/Defocus_Deblurring/pretrained_models && \
+    \
+    # -- Real Denoising -------------------------------------------------------
+    wget -q --show-progress \
+        "https://github.com/swz30/Restormer/releases/download/v1.0/real_denoising.pth" \
+        -O /app/Restormer/Denoising/pretrained_models/real_denoising.pth || \
+    /opt/venv_restormer/bin/gdown --fuzzy \
+        "https://drive.google.com/uc?id=1Qwsjyny54RZWa7zC4Apg7exixLBo4uF0" \
+        -O /app/Restormer/Denoising/pretrained_models/real_denoising.pth && \
+    \
+    # -- Motion Deblurring ----------------------------------------------------
+    wget -q --show-progress \
+        "https://github.com/swz30/Restormer/releases/download/v1.0/motion_deblurring.pth" \
+        -O /app/Restormer/Motion_Deblurring/pretrained_models/motion_deblurring.pth || \
+    /opt/venv_restormer/bin/gdown --fuzzy \
+        "https://drive.google.com/uc?id=1czMyfRTQDX3j3ErByYeZ1PM4GVLbJeGK" \
+        -O /app/Restormer/Motion_Deblurring/pretrained_models/motion_deblurring.pth && \
+    \
+    # -- Deraining ------------------------------------------------------------
+    wget -q --show-progress \
+        "https://github.com/swz30/Restormer/releases/download/v1.0/deraining.pth" \
+        -O /app/Restormer/Deraining/pretrained_models/deraining.pth || \
+    /opt/venv_restormer/bin/gdown --fuzzy \
+        "https://drive.google.com/uc?id=1ZEDDEVW0UgkpWi-N4Lj_JUoVChGXCu_u" \
+        -O /app/Restormer/Deraining/pretrained_models/deraining.pth && \
+    \
+    # -- Defocus Deblurring ---------------------------------------------------
+    wget -q --show-progress \
+        "https://github.com/swz30/Restormer/releases/download/v1.0/single_image_defocus_deblurring.pth" \
+        -O /app/Restormer/Defocus_Deblurring/pretrained_models/single_image_defocus_deblurring.pth || \
+    /opt/venv_restormer/bin/gdown --fuzzy \
+        "https://drive.google.com/uc?id=1bRBG8DG_72AGA6-eRePvChlT5ZO4cwJ4" \
+        -O /app/Restormer/Defocus_Deblurring/pretrained_models/single_image_defocus_deblurring.pth && \
+    \
+    # -- Gaussian Color Denoising
+    wget -q "https://github.com/swz30/Restormer/releases/download/v1.0/gaussian_color_denoising_blind.pth" \
+        -O /app/Restormer/Denoising/pretrained_models/gaussian_color_denoising_blind.pth || \
+    /opt/venv_restormer/bin/gdown --fuzzy \
+        "https://drive.google.com/uc?id=1Qwsjyny54RZWa7zC4Apg7exixLBo4uF0" \
+        -O /app/Restormer/Denoising/pretrained_models/gaussian_color_denoising_blind.pth && \
+    # -- Gaussian Gray Denoising
+    wget -q "https://github.com/swz30/Restormer/releases/download/v1.0/gaussian_gray_denoising_blind.pth" \
+        -O /app/Restormer/Denoising/pretrained_models/gaussian_gray_denoising_blind.pth || \
+    /opt/venv_restormer/bin/gdown --fuzzy \
+        "https://drive.google.com/uc?id=1Qwsjyny54RZWa7zC4Apg7exixLBo4uF0" \
+        -O /app/Restormer/Denoising/pretrained_models/gaussian_gray_denoising_blind.pth \
+    # -- Check everything OK -----------------------------------------------
+    ls /app/Restormer/Denoising/pretrained_models/ && \
+    ls /app/Restormer/Motion_Deblurring/pretrained_models/ && \
+    ls /app/Restormer/Deraining/pretrained_models/ && \
+    ls /app/Restormer/Defocus_Deblurring/pretrained_models/
 
 # -- 3. WONDER3D (Python 3.10) -------------------------------------------------
 RUN python3.10 -m venv /opt/venv_wonder3d
@@ -59,15 +104,18 @@ RUN /opt/venv_wonder3d/bin/pip install \
 
 RUN /opt/venv_wonder3d/bin/pip install ninja setuptools wheel packaging
 
-# RUN /opt/venv_wonder3d/bin/pip install \
-#     git+https://github.com/NVlabs/nvdiffrast.git --no-build-isolation
-
-RUN git clone https://github.com/NVlabs/nvdiffrast.git /tmp/nvdiffrast && \
-    cd /tmp/nvdiffrast && \
+# -- nvdiffrast: compileaza extensia C++ .so prin pip, apoi copiaza sursa
+# peste ca sa avem si modulul Python accesibil corect
+RUN git clone https://github.com/NVlabs/nvdiffrast.git /opt/nvdiffrast && \
+    cd /opt/nvdiffrast && \
     CUDA_HOME=/usr/local/cuda-12.1 \
+    PATH=/usr/local/cuda-12.1/bin:$PATH \
     /opt/venv_wonder3d/bin/pip install . --no-build-isolation && \
-    cd /app && \
-    /opt/venv_wonder3d/bin/python -c "import nvdiffrast.torch as dr; print('nvdiffrast installed successfully!')"
+    sed -i 's/__version__ = version(__package__ or .nvdiffrast.)/__version__ = "0.0.0"/' \
+        /opt/nvdiffrast/nvdiffrast/__init__.py && \
+    cp -r /opt/nvdiffrast/nvdiffrast \
+        /opt/venv_wonder3d/lib/python3.10/site-packages/nvdiffrast && \
+    /opt/venv_wonder3d/bin/python -c "import nvdiffrast.torch as dr; print('nvdiffrast OK')"
 
 RUN /opt/venv_wonder3d/bin/pip install \
     torch-scatter -f https://data.pyg.org/whl/torch-2.4.1+cu121.html
@@ -75,6 +123,7 @@ RUN /opt/venv_wonder3d/bin/pip install \
 RUN /opt/venv_wonder3d/bin/pip install \
     pymeshlab \
     trimesh \
+    pyglet \
     google-cloud-storage
 
 RUN git clone https://github.com/xxlong0/Wonder3D.git /app/Wonder3D && \
@@ -108,3 +157,5 @@ COPY cloud/cloud_pipeline.py          /app/cloud_pipeline.py
 # -- 5. ENTRYPOINT -------------------------------------------------------------
 ENTRYPOINT ["/opt/venv_wonder3d/bin/python", "/app/cloud_pipeline.py"]
 CMD ["--input_image", "gs://default-bucket/input.png"]
+
+

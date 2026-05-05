@@ -5,7 +5,8 @@ import os
 import sys
 import gc
 
-# fix ?
+# bypass safety check for torch.load to allow loading float16 models on CPU without errors.
+#  This is needed for the mesh refinement step which may run on CPU.
 try:
     import transformers.utils.import_utils
     transformers.utils.import_utils.check_torch_load_is_safe = lambda: True

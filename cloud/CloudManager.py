@@ -6,6 +6,8 @@ from googleapiclient.discovery import build
 from google.cloud import storage
 from google.cloud import aiplatform
 
+from CloudBudgetManager import CloudBudgetManager, DEFAULT_MONTHLY_LIMIT_USD
+
 
 class CloudManager:
     def __init__(self, client_secrets_path="client_secrets.json"):
@@ -14,12 +16,17 @@ class CloudManager:
             "https://www.googleapis.com/auth/cloud-platform",
             "https://www.googleapis.com/auth/cloud-billing.readonly",
             "https://www.googleapis.com/auth/devstorage.read_write",
-            "https://www.googleapis.com/auth/drive.file",  # Neural Forge folder only
+            "https://www.googleapis.com/auth/drive.file",
+            "https://www.googleapis.com/auth/userinfo.email",
+            "https://www.googleapis.com/auth/userinfo.profile",
+            "openid",
         ]
         self.creds       = None
         self.project_id  = None
         self.bucket_name = None
         self.region      = "europe-west4"
+
+    # -- Auth ------------------------------------------------------------------
 
     def authenticate(self):
         token_path = os.path.join(os.path.dirname(self.client_secrets), "token.pickle")
@@ -51,8 +58,9 @@ class CloudManager:
         print("Authentication successful.")
         return self.creds
 
+    # -- User info -------------------------------------------------------------
+
     def get_user_info(self) -> dict:
-        # Returns basic profile info using the authenticated credentials
         try:
             service  = build("oauth2", "v2", credentials=self.creds)
             userinfo = service.userinfo().get().execute()
@@ -64,6 +72,8 @@ class CloudManager:
         except Exception as e:
             print(f"Could not fetch user info: {e}")
             return {}
+
+    # -- Project ---------------------------------------------------------------
 
     def get_project_info(self):
         if not self.creds:
@@ -80,6 +90,8 @@ class CloudManager:
         print(f"Using project: {self.project_id}")
         return self.project_id
 
+    # -- Billing ---------------------------------------------------------------
+
     def check_billing(self):
         if not self.project_id:
             self.get_project_info()
@@ -94,6 +106,8 @@ class CloudManager:
         except Exception as e:
             print(f"Error checking billing: {e}")
             return False
+
+    # -- Storage ---------------------------------------------------------------
 
     def setup_storage(self):
         if not self.project_id:
@@ -127,27 +141,68 @@ class CloudManager:
         print(f"Available at: {uri}")
         return uri
 
-    def download_results_from_gcs(self, local_output_dir: str) -> list[str]:
-        # Downloads all files from outputs/ in the bucket to local dir
-        if not self.bucket_name:
-            raise RuntimeError("Bucket not set — call setup_storage() first.")
+    def _gcs_client(self) -> storage.Client:
+        return storage.Client(credentials=self.creds, project=self.project_id)
 
-        client    = storage.Client(credentials=self.creds, project=self.project_id)
-        bucket    = client.bucket(self.bucket_name)
-        blobs     = list(bucket.list_blobs(prefix="outputs/"))
+    def download_results_from_gcs(self, local_output_dir: str) -> list[str]:
+        if not self.bucket_name:
+            raise RuntimeError("Bucket not set. Call setup_storage() first.")
+
+        client     = self._gcs_client()
+        bucket     = client.bucket(self.bucket_name)
+        blobs      = list(bucket.list_blobs(prefix="outputs/"))
         os.makedirs(local_output_dir, exist_ok=True)
         downloaded = []
 
         for blob in blobs:
-            file_name  = os.path.basename(blob.name)
+            file_name = os.path.basename(blob.name)
             if not file_name:
                 continue
             local_path = os.path.join(local_output_dir, file_name)
-            print(f"[GCS] Downloading {blob.name} → {local_path}")
+            print(f"[GCS] Downloading {blob.name} -> {local_path}")
             blob.download_to_filename(local_path)
             downloaded.append(local_path)
 
         return downloaded
+
+    def delete_gcs_prefix(self, prefix: str):
+        if not self.bucket_name:
+            return
+        client = self._gcs_client()
+        blobs  = list(client.bucket(self.bucket_name).list_blobs(prefix=prefix))
+        for blob in blobs:
+            blob.delete()
+            print(f"[GCS] Deleted {blob.name}")
+        print(f"[GCS] Deleted {len(blobs)} blob(s) under '{prefix}'")
+
+    def delete_gcs_inputs(self, filename: str = None):
+        if filename:
+            self.delete_gcs_prefix(f"inputs/{filename}")
+        else:
+            self.delete_gcs_prefix("inputs/")
+
+    def delete_gcs_outputs(self):
+        self.delete_gcs_prefix("outputs/")
+
+    # -- Budget ----------------------------------------------------------------
+
+    def build_budget_manager(
+        self,
+        user_email: str,
+        monthly_limit: float = DEFAULT_MONTHLY_LIMIT_USD,
+    ) -> CloudBudgetManager:
+        # Bucket must exist before we can store budget blobs inside it
+        if not self.bucket_name:
+            self.setup_storage()
+        return CloudBudgetManager(
+            user_email=user_email,
+            creds=self.creds,
+            bucket_name=self.bucket_name,
+            project_id=self.project_id,
+            monthly_limit=monthly_limit,
+        )
+
+    # -- Vertex AI job ---------------------------------------------------------
 
     def launch_vertex_job(
         self,
@@ -158,9 +213,11 @@ class CloudManager:
         mesh_faces: int = 8000,
         mesh_stages: int = 1,
         mesh_intermediate: bool = False,
+        mesh_optimize: bool = True,
         gpu_type: str = "L4",
         wonder3d_mode: str = "official",
         restormer_tasks: str = "Real_Denoising",
+        budget_manager: CloudBudgetManager = None,
     ):
         gpu_configs = {
             "L4": ("g2-standard-4", "NVIDIA_L4"),
@@ -168,6 +225,17 @@ class CloudManager:
         }
         if gpu_type not in gpu_configs:
             raise ValueError(f"Unknown gpu_type '{gpu_type}'. Choose 'L4' or 'T4'.")
+
+        if budget_manager is not None:
+            allowed, cost, remaining = budget_manager.can_submit(gpu_type, refine, wonder3d_mode)
+            if not allowed:
+                summary = budget_manager.summary()
+                raise RuntimeError(
+                    f"Budget exceeded. Estimated cost: ${cost:.2f}, "
+                    f"remaining: ${remaining:.2f} / ${summary['monthly_limit_usd']:.2f} "
+                    f"(resets on the 1st of next month)"
+                )
+            print(f"[BUDGET] Estimated cost: ${cost:.2f} | Remaining after job: ${remaining - cost:.2f}")
 
         if not self.project_id:
             self.get_project_info()
@@ -190,6 +258,8 @@ class CloudManager:
         ]
         if mesh_intermediate:
             args.append("--mesh_intermediate")
+        if not mesh_optimize:
+            args.append("--skip_mesh")
 
         machine_type, accelerator_type = gpu_configs[gpu_type]
 
@@ -211,15 +281,23 @@ class CloudManager:
         )
         job.run(sync=False)
         print(f"Job submitted: {job.resource_name}")
+
+        if budget_manager is not None:
+            job_name = job.resource_name.split("/")[-1]
+            cost     = budget_manager.record_job(gpu_type, refine, job_name, wonder3d_mode)
+            print(f"[BUDGET] Recorded ${cost:.3f} for job {job_name}")
+
         return job
+
+    # -- Artifact registry -----------------------------------------------------
 
     def setup_artifact_registry(self, repo_name: str = "ai-models") -> str:
         if not self.project_id:
             self.get_project_info()
 
-        service  = build("artifactregistry", "v1", credentials=self.creds)
-        parent   = f"projects/{self.project_id}/locations/{self.region}"
-        repo_id  = f"{parent}/repositories/{repo_name}"
+        service = build("artifactregistry", "v1", credentials=self.creds)
+        parent  = f"projects/{self.project_id}/locations/{self.region}"
+        repo_id = f"{parent}/repositories/{repo_name}"
 
         try:
             service.projects().locations().repositories().get(name=repo_id).execute()
@@ -251,6 +329,8 @@ if __name__ == "__main__":
         if os.path.exists(test_image):
             cloud_uri = manager.upload_file(test_image)
             image_uri = manager.setup_artifact_registry()
+
+            budget = manager.build_budget_manager(user_email=user.get("email", ""))
             job = manager.launch_vertex_job(
                 image_uri=image_uri,
                 input_uri=cloud_uri,
@@ -259,6 +339,7 @@ if __name__ == "__main__":
                 mesh_faces=8000,
                 mesh_stages=3,
                 gpu_type="L4",
+                budget_manager=budget,
             )
             print(f"Job started: {job.resource_name}")
         else:

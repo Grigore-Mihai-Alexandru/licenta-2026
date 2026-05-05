@@ -44,6 +44,11 @@ class AppWindow(QMainWindow):
         self.stack.setCurrentIndex(SCREEN_WELCOME)
 
     def _on_local(self):
+        from PySide6.QtCore import QSettings
+        from ui.components.DockerWarningDialog import DockerWarningDialog
+        settings = QSettings("NeuralForge", "App")
+        if not DockerWarningDialog.run_if_needed(settings, self):
+            return
         self.run_mode  = "local"
         self.user_info = {}
         self._launch_pipeline()

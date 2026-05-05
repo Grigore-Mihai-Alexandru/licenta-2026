@@ -9,6 +9,10 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt, Signal, QTimer, QThread, QObject
 from PySide6.QtGui import QFont, QColor
 
+_TOKEN_PATH = os.path.abspath(
+    os.path.join(os.path.dirname(__file__), "..", "..", "cloud", "token.pickle")
+)
+
 from ui.styles.theme import (
     BG_SURFACE, BG_ELEVATED,
     BORDER, BORDER_BRIGHT,
@@ -16,6 +20,7 @@ from ui.styles.theme import (
     NEON_GREEN, NEON_ORANGE, PURPLE,
     TEXT_PRIMARY, TEXT_SECONDARY, TEXT_MUTED
 )
+from ui.icons import CloudUploadIcon
 
 
 class AuthWorker(QObject):
@@ -52,6 +57,13 @@ class AuthWorker(QObject):
             if os.path.exists(token_path):
                 with open(token_path, "rb") as f:
                     creds = pickle.load(f)
+
+            # If the saved token is missing required scopes, discard it so a
+            # fresh browser auth is triggered (picks up any newly added scopes).
+            if creds and creds.scopes:
+                required = {"https://www.googleapis.com/auth/userinfo.email", "openid"}
+                if not required.issubset(creds.scopes):
+                    creds = None
 
             if not creds or not creds.valid:
                 if creds and creds.expired and creds.refresh_token:
@@ -91,7 +103,15 @@ class LoginScreen(QWidget):
         super().__init__(parent)
         self._thread = None
         self._worker = None
+        self._auto_triggered = False
         self._build()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        # If a saved token exists, skip the button and authenticate silently.
+        if os.path.exists(_TOKEN_PATH) and not self._auto_triggered:
+            self._auto_triggered = True
+            QTimer.singleShot(120, self._on_login)
 
     def _build(self):
         root = QVBoxLayout(self)
@@ -113,7 +133,7 @@ class LoginScreen(QWidget):
             }}
             QPushButton:hover {{ color: {CYAN}; }}
         """)
-        self.btn_back.clicked.connect(self.back_requested)
+        self.btn_back.clicked.connect(self._on_back)
         back_row.addWidget(self.btn_back, alignment=Qt.AlignLeft)
         back_row.addStretch()
         root.addLayout(back_row)
@@ -141,10 +161,8 @@ class LoginScreen(QWidget):
         cl.setContentsMargins(40, 40, 40, 40)
         cl.setAlignment(Qt.AlignCenter)
 
-        icon = QLabel("☁️")
-        icon.setAlignment(Qt.AlignCenter)
-        icon.setStyleSheet("border: none; background: transparent; font-size: 64px;")
-        cl.addWidget(icon)
+        icon = CloudUploadIcon(size=80, color=CYAN)
+        cl.addWidget(icon, alignment=Qt.AlignCenter)
 
         title = QLabel("GOOGLE CLOUD")
         title.setAlignment(Qt.AlignCenter)
@@ -159,7 +177,13 @@ class LoginScreen(QWidget):
         """)
         cl.addWidget(title)
 
-        desc = QLabel("Sign in with your Google account\nto run the pipeline on the cloud.")
+        has_token = os.path.exists(_TOKEN_PATH)
+        desc_text = (
+            "Resuming your previous session…"
+            if has_token
+            else "Sign in with your Google account\nto run the pipeline on the cloud."
+        )
+        desc = QLabel(desc_text)
         desc.setAlignment(Qt.AlignCenter)
         desc.setStyleSheet(f"""
             color: {TEXT_SECONDARY};
@@ -168,6 +192,7 @@ class LoginScreen(QWidget):
             font-size: 14px;
         """)
         cl.addWidget(desc)
+        self._desc_lbl = desc
 
         divider = QFrame()
         divider.setFixedHeight(1)
@@ -218,6 +243,7 @@ class LoginScreen(QWidget):
             }}
         """)
         self.btn_google.clicked.connect(self._on_login)
+        self.btn_google.setVisible(not has_token)
         cl.addWidget(self.btn_google, alignment=Qt.AlignCenter)
 
         self.status_lbl = QLabel("")
@@ -232,6 +258,10 @@ class LoginScreen(QWidget):
         footer.setAlignment(Qt.AlignCenter)
         footer.setStyleSheet(f"color: {TEXT_MUTED}; font-size: 11px;")
         root.addWidget(footer)
+
+    def _on_back(self):
+        self._auto_triggered = False
+        self.back_requested.emit()
 
     def _on_login(self):
         self.btn_google.setEnabled(False)

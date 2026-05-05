@@ -20,10 +20,7 @@ except ImportError:
     HAS_NUMPY = False
 
 
-# Helpers
-
 def get_stage_targets(initial_faces: int, target_faces: int, stages: int) -> list[int]:
-    # Exponential decay: natural LOD progression (e.g. 500k → 250k → 125k → 60k)
     if stages <= 1:
         return [target_faces]
     ratio = (target_faces / initial_faces) ** (1.0 / stages)
@@ -63,7 +60,6 @@ def decimate_to_target(ms: ml.MeshSet, target: int) -> bool:
 
 
 def load_mesh(input_file: str) -> ml.MeshSet:
-    # GLB/GLTF need trimesh to extract geometry first, pymeshlab can't load them directly
     if os.path.splitext(input_file)[1].lower() in (".glb", ".gltf") and HAS_TRIMESH:
         print("  [INFO] GLB detected — extracting geometry via trimesh...")
         mesh = trimesh.load(input_file, force="mesh")
@@ -82,12 +78,10 @@ def load_mesh(input_file: str) -> ml.MeshSet:
 def save_mesh(ms: ml.MeshSet, path: str, export_stl: bool = False) -> tuple:
     base     = os.path.splitext(path)[0]
     obj_path = base + ".obj"
-    glb_path = base + ".glb"
     stl_path = base + ".stl" if export_stl else None
 
     ms.save_current_mesh(obj_path, save_textures=False)
 
-    # GLB via trimesh — pymeshlab GLB export is unreliable
     glb_path = None
     if HAS_TRIMESH:
         try:
@@ -107,6 +101,15 @@ def save_mesh(ms: ml.MeshSet, path: str, export_stl: bool = False) -> tuple:
     return obj_path, glb_path, stl_path
 
 
+def save_stl_only(ms: ml.MeshSet, path: str) -> str:
+    try:
+        ms.save_current_mesh(path)
+        return path
+    except Exception as e:
+        print(f"  [WARN] STL export failed: {e}")
+        return None
+
+
 def collect_metrics(ms: ml.MeshSet, label: str, elapsed_s=None, file_path=None) -> dict:
     entry = {
         "label":    label,
@@ -119,8 +122,6 @@ def collect_metrics(ms: ml.MeshSet, label: str, elapsed_s=None, file_path=None) 
         entry["file_size_kb"] = round(os.path.getsize(file_path) / 1024.0, 2)
     return entry
 
-
-# Print pipeline helpers
 
 def check_and_repair_watertight(ms: ml.MeshSet) -> dict:
     report = {"was_watertight": False, "repaired": False, "repair_steps": []}
@@ -164,66 +165,69 @@ def check_and_repair_watertight(ms: ml.MeshSet) -> dict:
     return report
 
 
-def scale_to_size(ms: ml.MeshSet, target_mm: float) -> dict | None:
-    bb     = ms.current_mesh().bounding_box()
-    dims   = [bb.dim_x(), bb.dim_y(), bb.dim_z()]
-    max_dim = max(dims)
-    if max_dim <= 0:
-        print("  [WARN] Invalid bounding box, skipping scale.")
-        return None
+def run_print_branch(input_file: str, output_dir: str, output_base: str,
+                     target_size_mm: float, infill: float,
+                     filament_cost: float) -> dict:
+    print("\n[PRINT] Starting print branch on original high-poly...")
 
-    factor = target_mm / max_dim
-    ms.apply_filter(
-        "compute_matrix_from_scaling_or_normalization",
-        axisx=factor, axisy=factor, axisz=factor,
-    )
+    ms = load_mesh(input_file)
+    original_faces = ms.current_mesh().face_number()
+    print(f"  Original: {original_faces:,} faces (no decimation for print)")
+
+    watertight_report = check_and_repair_watertight(ms)
+    status = "watertight" if watertight_report.get("is_watertight_after_repair") else "not fully watertight"
+    print(f"  Repair steps: {watertight_report['repair_steps']}  ->  {status}")
+
+    if target_size_mm:
+        bb      = ms.current_mesh().bounding_box()
+        dims    = [bb.dim_x(), bb.dim_y(), bb.dim_z()]
+        max_dim = max(dims)
+        if max_dim > 0:
+            factor = target_size_mm / max_dim
+            ms.apply_filter(
+                "compute_matrix_from_scaling_or_normalization",
+                axisx=factor, axisy=factor, axisz=factor,
+            )
+            print(f"  Scaled to {target_size_mm}mm (factor {round(factor, 4)})")
+
+    stl_path = os.path.join(output_dir, output_base + "_print.stl")
+    saved_stl = save_stl_only(ms, stl_path)
+    if saved_stl:
+        print(f"  [PRINT] STL saved: {saved_stl}")
+
+    print_cost = None
+    if HAS_TRIMESH and saved_stl:
+        try:
+            t = trimesh.load(saved_stl, force="mesh")
+            volume_mm3   = abs(float(t.volume))
+            volume_cm3   = volume_mm3 / 1000.0
+            surface_mm2  = float(t.area)
+            shell_cm3    = (surface_mm2 * 1.2) / 1000.0
+            infill_cm3   = max(0.0, volume_cm3 - shell_cm3) * infill
+            material_cm3 = shell_cm3 + infill_cm3
+            weight_g     = material_cm3 * 1.24
+            cost_eur     = (weight_g / 1000.0) * filament_cost
+            print_cost = {
+                "volume_cm3":             round(volume_cm3, 4),
+                "estimated_material_cm3": round(material_cm3, 4),
+                "estimated_weight_g":     round(weight_g, 2),
+                "infill_pct":             int(infill * 100),
+                "filament_cost_per_kg":   filament_cost,
+                "estimated_cost_eur":     round(cost_eur, 3),
+            }
+            print(f"  Volume:   {print_cost['volume_cm3']} cm3")
+            print(f"  Weight:   ~{print_cost['estimated_weight_g']}g  ({print_cost['infill_pct']}% infill)")
+            print(f"  Est cost: ~{print_cost['estimated_cost_eur']} EUR")
+        except Exception as e:
+            print(f"  [WARN] Cost estimation failed: {e}")
+
     return {
-        "original_max_dim_mm": round(max_dim, 4),
-        "target_mm":           target_mm,
-        "scale_factor":        round(factor, 6),
-        "scaled_dims_mm":      [round(d * factor, 3) for d in dims],
+        "stl_path":         saved_stl,
+        "original_faces":   original_faces,
+        "watertight":       watertight_report,
+        "print_cost":       print_cost,
     }
 
-
-def estimate_print_cost(
-    ms: ml.MeshSet,
-    infill: float = 0.20,
-    filament_density: float = 1.24,
-    filament_cost_per_kg: float = 25.0,
-) -> dict | None:
-    if not HAS_TRIMESH:
-        print("  [WARN] trimesh required for cost estimation.")
-        return None
-    try:
-        tmp = tempfile.NamedTemporaryFile(suffix=".obj", delete=False)
-        tmp.close()
-        ms.save_current_mesh(tmp.name, save_textures=False)
-        t = trimesh.load(tmp.name, force="mesh")
-        os.unlink(tmp.name)
-
-        volume_mm3      = abs(float(t.volume))
-        volume_cm3      = volume_mm3 / 1000.0
-        surface_mm2     = float(t.area)
-        shell_cm3       = (surface_mm2 * 1.2) / 1000.0          # 1.2mm shell
-        infill_cm3      = max(0.0, volume_cm3 - shell_cm3) * infill
-        material_cm3    = shell_cm3 + infill_cm3
-        weight_g        = material_cm3 * filament_density
-        cost_eur        = (weight_g / 1000.0) * filament_cost_per_kg
-
-        return {
-            "volume_cm3":           round(volume_cm3, 4),
-            "estimated_material_cm3": round(material_cm3, 4),
-            "estimated_weight_g":   round(weight_g, 2),
-            "infill_pct":           int(infill * 100),
-            "filament_cost_per_kg": filament_cost_per_kg,
-            "estimated_cost_eur":   round(cost_eur, 3),
-        }
-    except Exception as e:
-        print(f"  [WARN] Cost estimation failed: {e}")
-        return None
-
-
-# Main
 
 def optimize_mesh(
     input_file: str,
@@ -244,60 +248,35 @@ def optimize_mesh(
     stages  = max(1, min(5, stages))
     t_start = time.perf_counter()
 
-    # Probe initial stats without keeping the MeshSet alive
     ms_probe         = load_mesh(input_file)
     initial_faces    = ms_probe.current_mesh().face_number()
     initial_vertices = ms_probe.current_mesh().vertex_number()
     del ms_probe
 
+    output_dir  = os.path.dirname(os.path.abspath(output_file))
+    output_base = os.path.splitext(os.path.basename(output_file))[0]
+
     print(f"\n[MESH] Input:    {os.path.basename(input_file)}")
     print(f"       Faces:    {initial_faces:,}")
     print(f"       Vertices: {initial_vertices:,}")
     print(f"       Target:   {target_faces:,} in {stages} stage(s)")
-    print(f"       Mode:     Direct LOD (each level from original)\n")
 
-    metrics_log      = []
-    watertight_report = None
+    metrics_log   = []
+    stage_results = []
 
-    if print_mode:
-        print("[PRINT] Watertight repair...")
-        ms_repair = load_mesh(input_file)
-        watertight_report = check_and_repair_watertight(ms_repair)
-        status = "OK" if watertight_report.get("is_watertight_after_repair") else "not fully watertight"
-        print(f"  Steps: {watertight_report['repair_steps']}  →  {status}")
-        # Save repaired mesh as the new source so LODs inherit repairs
-        tmp_repaired = tempfile.NamedTemporaryFile(suffix=".obj", delete=False)
-        tmp_repaired.close()
-        ms_repair.save_current_mesh(tmp_repaired.name, save_textures=False)
-        input_file = tmp_repaired.name
-        del ms_repair
-
-    if target_faces >= initial_faces:
-        print("[WARN] Target >= input faces. No decimation needed.")
-        ms = load_mesh(input_file)
-        obj, glb, stl = save_mesh(ms, output_file, export_stl=print_mode)
-        return {
-            "input_faces": initial_faces, "output_faces": initial_faces,
-            "reduction_pct": 0.0, "lod_mode": "none",
-            "stages": [], "output_obj": obj, "output_glb": glb, "output_stl": stl,
-        }
+    # -- branch 1: lowpoly deciamtion ------------
+    print(f"\n[LOWPOLY] Decimating to {target_faces:,} faces...")
 
     stage_targets = get_stage_targets(initial_faces, target_faces, stages)
-    print(f"[MESH] LOD targets: {' → '.join(f'{t:,}' for t in stage_targets)}\n")
-
-    output_dir  = os.path.dirname(os.path.abspath(output_file))
-    output_base = os.path.splitext(os.path.basename(output_file))[0]
-    stage_results = []
+    print(f"  LOD targets: {' -> '.join(f'{t:,}' for t in stage_targets)}\n")
 
     for i, target in enumerate(stage_targets):
         stage_num = i + 1
         is_last   = stage_num == len(stage_targets)
 
-        # Direct LOD: reload original every time — preserves quadric error
-        # matrices per level instead of accumulating degradation sequentially
         ms = load_mesh(input_file)
 
-        print(f"[LOD {stage_num}/{stages}] {initial_faces:,} → {target:,}...")
+        print(f"[LOD {stage_num}/{stages}] {initial_faces:,} -> {target:,}...")
         t0      = time.perf_counter()
         success = decimate_to_target(ms, target)
         elapsed = time.perf_counter() - t0
@@ -310,7 +289,7 @@ def optimize_mesh(
         vertices_after = ms.current_mesh().vertex_number()
         reduction      = (1 - faces_after / initial_faces) * 100
 
-        print(f"  ✓ {faces_after:,} faces, {vertices_after:,} verts  ({reduction:.1f}% from original)  {elapsed:.2f}s")
+        print(f"  ok {faces_after:,} faces, {vertices_after:,} verts  ({reduction:.1f}% from original)  {elapsed:.2f}s")
 
         stage_info = {
             "lod":            stage_num,
@@ -325,21 +304,12 @@ def optimize_mesh(
             metrics_log.append(collect_metrics(ms, f"lod_{stage_num}", elapsed_s=elapsed))
 
         if is_last:
-            if print_mode and target_size_mm:
-                print(f"\n[PRINT] Scaling to {target_size_mm}mm...")
-                scale_info = scale_to_size(ms, target_size_mm)
-                if scale_info:
-                    print(f"  Factor: {scale_info['scale_factor']}  Dims: {scale_info['scaled_dims_mm']} mm")
-                    stage_info["scale"] = scale_info
-
-            obj, glb, stl = save_mesh(ms, output_file, export_stl=print_mode)
+            obj, glb, _ = save_mesh(ms, output_file, export_stl=False)
             stage_info["saved_obj"] = obj
             stage_info["saved_glb"] = glb
-            stage_info["saved_stl"] = stl
-
         elif save_intermediate:
             lod_path = os.path.join(output_dir, f"{output_base}_lod{stage_num}.obj")
-            obj, glb, stl = save_mesh(ms, lod_path)
+            obj, glb, _ = save_mesh(ms, lod_path)
             stage_info["saved_obj"] = obj
             stage_info["saved_glb"] = glb
             print(f"  Saved: {os.path.basename(obj)}")
@@ -351,25 +321,16 @@ def optimize_mesh(
     total_reduction = (1 - final_faces / initial_faces) * 100
     total_elapsed   = time.perf_counter() - t_start
 
-    print_cost = None
+    print(f"\n[MESH] Lowpoly done in {total_elapsed:.2f}s")
+    print(f"       {initial_faces:,} -> {final_faces:,} faces  ({total_reduction:.1f}% reduction)")
+
+    # -- branch 2: print STL --------------------
+    print_result = None
     if print_mode:
-        print("\n[PRINT] Estimating material cost...")
-        ms_cost = load_mesh(stage_results[-1]["saved_obj"])
-        print_cost = estimate_print_cost(ms_cost, infill=infill, filament_cost_per_kg=filament_cost)
-        if print_cost:
-            print(f"  Volume:   {print_cost['volume_cm3']} cm³")
-            print(f"  Weight:   ~{print_cost['estimated_weight_g']}g  ({print_cost['infill_pct']}% infill)")
-            print(f"  Est cost: ~{print_cost['estimated_cost_eur']} EUR")
-
-    print(f"\n[MESH] Done in {total_elapsed:.2f}s")
-    print(f"       {initial_faces:,} → {final_faces:,} faces  ({total_reduction:.1f}% reduction)")
-
-    # Clean up temp repaired file if created
-    if watertight_report and os.path.exists(input_file) and "tmp" in input_file:
-        try:
-            os.unlink(input_file)
-        except Exception:
-            pass
+        print_result = run_print_branch(
+            input_file, output_dir, output_base,
+            target_size_mm, infill, filament_cost
+        )
 
     report = {
         "input_file":      input_file,
@@ -378,47 +339,46 @@ def optimize_mesh(
         "output_faces":    final_faces,
         "output_vertices": final_vertices,
         "reduction_pct":   round(total_reduction, 2),
-        "total_elapsed_s": round(total_elapsed, 4),
+        "total_elapsed_s": round(time.perf_counter() - t_start, 4),
         "lod_mode":        "direct",
         "stages":          stage_results,
         "output_obj":      stage_results[-1].get("saved_obj"),
         "output_glb":      stage_results[-1].get("saved_glb"),
-        "output_stl":      stage_results[-1].get("saved_stl"),
+        "output_stl":      None,
     }
 
-    if watertight_report:
-        report["watertight"] = watertight_report
-    if print_cost:
-        report["print_cost"] = print_cost
+    if print_result:
+        report["output_stl"]   = print_result.get("stl_path")
+        report["watertight"]   = print_result.get("watertight")
+        report["print_cost"]   = print_result.get("print_cost")
+        report["print_faces"]  = print_result.get("original_faces")
+
     if log_metrics:
         report["metrics_log"] = metrics_log
 
     if report_path:
         with open(report_path, "w") as f:
             json.dump(report, f, indent=2)
-        print(f"       Report → {report_path}")
+        print(f"  Report -> {report_path}")
 
     return report
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Direct LOD mesh decimation")
-    parser.add_argument("--input",         type=str,   required=True)
-    parser.add_argument("--output",        type=str,   required=True)
-    parser.add_argument("--faces",         type=int,   default=8000)
-    parser.add_argument("--stages",        type=int,   default=1)
-    parser.add_argument("--intermediate",  action="store_true",  help="Save each LOD as separate file")
-    parser.add_argument("--report",        type=str,   default=None)
+    parser = argparse.ArgumentParser(description="Mesh decimation + optional print STL")
+    parser.add_argument("--input",         type=str, required=True)
+    parser.add_argument("--output",        type=str, required=True)
+    parser.add_argument("--faces",         type=int, default=8000)
+    parser.add_argument("--stages",        type=int, default=1)
+    parser.add_argument("--intermediate",  action="store_true")
+    parser.add_argument("--report",        type=str, default=None)
     parser.add_argument("--print",         dest="print_mode", action="store_true",
-                        help="3D print pipeline: watertight repair + STL export + cost estimate")
-    parser.add_argument("--size",          type=float, default=None,
-                        help="Scale mesh to this max dimension in mm (requires --print)")
-    parser.add_argument("--infill",        type=float, default=0.20,
-                        help="Infill ratio 0.0–1.0 (default: 0.20)")
-    parser.add_argument("--filament-cost", type=float, default=25.0,
-                        help="Filament EUR/kg (default: 25.0)")
-    parser.add_argument("--metrics",       action="store_true",
-                        help="Log per-stage face count, file size, elapsed time in report")
+                        help="also export watertight STL from original high-poly")
+    parser.add_argument("--size",          type=float, default=50.0, # 5cm default max size for print
+                        help="scale STL to this max dimension in mm")
+    parser.add_argument("--infill",        type=float, default=0.20)
+    parser.add_argument("--filament-cost", type=float, default=25.0)
+    parser.add_argument("--metrics",       action="store_true")
     args = parser.parse_args()
 
     try:

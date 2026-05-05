@@ -1,16 +1,22 @@
 # exclude everything
 *
 
-# what docker needs
+# what VM from cloud needs
 !Dockerfile
 !assets/
 !assets/optimize_mesh.py
 !assets/run_wonder3d_float16.py
+!assets/run_wonder3d_official.py
 !cloud/
 !cloud/cloud_pipeline.py
 
-# ignore these!
+# ignore these! 101% sure to exclude :D
+*__pycache__
 client_secrets.json
 token.pickle
 *.pickle
-CloudManager.py
+old*
+*test*
+budget_state.json
+*.json
+*Manager*
