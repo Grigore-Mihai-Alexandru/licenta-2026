@@ -1,4 +1,4 @@
-# welcome_screen.py — First screen: choose Local or Google Cloud mode
+# welcome_screen.py - First screen: choose Local or Google Cloud mode
 
 import math
 
@@ -105,7 +105,7 @@ class ModeCard(QPushButton):
 
         self.title_lbl = QLabel(title)
         self.title_lbl.setAlignment(Qt.AlignCenter)
-        self.title_lbl.setFont(QFont("JetBrains Mono", 16, QFont.Bold))
+        self.title_lbl.setFont(QFont("JetBrains Mono", 20, QFont.Bold))
         self.title_lbl.setStyleSheet(
             f"color: {TEXT_PRIMARY}; background: transparent; border: none;"
         )
@@ -114,7 +114,7 @@ class ModeCard(QPushButton):
         sub_lbl = QLabel(subtitle)
         sub_lbl.setAlignment(Qt.AlignCenter)
         sub_lbl.setWordWrap(True)
-        sub_lbl.setFont(QFont("JetBrains Mono", 11))
+        sub_lbl.setFont(QFont("JetBrains Mono", 13))
         sub_lbl.setStyleSheet(
             f"color: {TEXT_SECONDARY}; background: transparent; border: none;"
         )
@@ -162,8 +162,8 @@ class ModeCard(QPushButton):
 class WelcomeScreen(QWidget):
     """
     Signals:
-        local_selected  — user chose local execution
-        remote_selected — user chose Google Cloud
+        local_selected  - user chose local execution
+        remote_selected - user chose Google Cloud
     """
     local_selected  = Signal()
     remote_selected = Signal()
@@ -188,7 +188,7 @@ class WelcomeScreen(QWidget):
 
         badge = QLabel("AI PIPELINE")
         badge.setAlignment(Qt.AlignCenter)
-        badge.setFont(QFont("JetBrains Mono", 11))
+        badge.setFont(QFont("JetBrains Mono", 13))
         badge.setStyleSheet(f"""
             color: {CYAN};
             background: {CYAN_GLOW};
@@ -212,9 +212,9 @@ class WelcomeScreen(QWidget):
         title.setGraphicsEffect(sh)
         header.addWidget(title)
 
-        subtitle = QLabel("Restormer  ·  Wonder3D  ·  Mesh Optimizer")
+        subtitle = QLabel("Restormer  -  Wonder3D  -  Mesh Optimizer")
         subtitle.setAlignment(Qt.AlignCenter)
-        subtitle.setFont(QFont("JetBrains Mono", 14))
+        subtitle.setFont(QFont("JetBrains Mono", 17))
         subtitle.setStyleSheet(f"color: {TEXT_SECONDARY}; letter-spacing: 2px;")
         header.addWidget(subtitle)
 
@@ -223,7 +223,7 @@ class WelcomeScreen(QWidget):
 
         mode_lbl = QLabel("SELECT EXECUTION MODE")
         mode_lbl.setAlignment(Qt.AlignCenter)
-        mode_lbl.setFont(QFont("JetBrains Mono", 12))
+        mode_lbl.setFont(QFont("JetBrains Mono", 15))
         mode_lbl.setStyleSheet(f"color: {TEXT_MUTED}; letter-spacing: 4px;")
         root.addWidget(mode_lbl)
         root.addSpacing(24)
@@ -245,7 +245,7 @@ class WelcomeScreen(QWidget):
 
         sep = QLabel("OR")
         sep.setAlignment(Qt.AlignCenter)
-        sep.setFont(QFont("JetBrains Mono", 13, QFont.Bold))
+        sep.setFont(QFont("JetBrains Mono", 16, QFont.Bold))
         sep.setStyleSheet(f"color: {TEXT_MUTED}; letter-spacing: 3px;")
         row.addWidget(sep)
 
@@ -257,14 +257,26 @@ class WelcomeScreen(QWidget):
             accent=CYAN,
         )
         self.btn_remote.clicked.connect(self.remote_selected)
-        row.addWidget(self.btn_remote)
+
+        cloud_col = QVBoxLayout()
+        cloud_col.setSpacing(8)
+        cloud_col.setAlignment(Qt.AlignCenter)
+        cloud_col.addWidget(self.btn_remote)
+
+        cost_lbl = QLabel("~$0.34 – $0.63 / run  -  L4 GPU")
+        cost_lbl.setAlignment(Qt.AlignCenter)
+        cost_lbl.setFont(QFont("JetBrains Mono", 12))
+        cost_lbl.setStyleSheet(f"color: {CYAN_DIM}; letter-spacing: 1px;")
+        cloud_col.addWidget(cost_lbl)
+
+        row.addLayout(cloud_col)
 
         root.addLayout(row)
         root.addSpacing(40)
 
-        footer = QLabel("v1.0.0  ·  AI 3D Reconstruction Pipeline")
+        footer = QLabel("v1.0.0  -  AI 3D Reconstruction Pipeline")
         footer.setAlignment(Qt.AlignCenter)
-        footer.setFont(QFont("JetBrains Mono", 10))
+        footer.setFont(QFont("JetBrains Mono", 12))
         footer.setStyleSheet(f"color: {TEXT_MUTED};")
         root.addWidget(footer)
 

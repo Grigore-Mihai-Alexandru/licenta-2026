@@ -1,4 +1,4 @@
-# login_screen.py — Google OAuth login screen (remote/cloud mode)
+# login_screen.py - Google OAuth login screen (remote/cloud mode)
 
 import sys
 import os
@@ -6,7 +6,9 @@ from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QPushButton, QGraphicsDropShadowEffect, QFrame
 )
-from PySide6.QtCore import Qt, Signal, QTimer, QThread, QObject
+import qtawesome as qta
+
+from PySide6.QtCore import Qt, Signal, QTimer, QThread, QObject, QSize
 from PySide6.QtGui import QFont, QColor
 
 _TOKEN_PATH = os.path.abspath(
@@ -61,7 +63,12 @@ class AuthWorker(QObject):
             # If the saved token is missing required scopes, discard it so a
             # fresh browser auth is triggered (picks up any newly added scopes).
             if creds and creds.scopes:
-                required = {"https://www.googleapis.com/auth/userinfo.email", "openid"}
+                required = {
+                    "https://www.googleapis.com/auth/userinfo.email",
+                    "openid",
+                    "https://www.googleapis.com/auth/drive.file",
+                    "https://www.googleapis.com/auth/cloud-platform",
+                }
                 if not required.issubset(creds.scopes):
                     creds = None
 
@@ -70,7 +77,7 @@ class AuthWorker(QObject):
                     try:
                         creds.refresh(Request())
                     except Exception:
-                        # Token revoked or expired — force fresh browser login
+                        # Token revoked or expired - force fresh browser login
                         creds = None
 
                 if not creds:
@@ -93,8 +100,8 @@ class AuthWorker(QObject):
 class LoginScreen(QWidget):
     """
     Signals:
-        login_success(CloudManager)  — emitted after successful Google auth
-        back_requested               — user clicked Back
+        login_success(CloudManager)  - emitted after successful Google auth
+        back_requested               - user clicked Back
     """
     login_success  = Signal(object)
     back_requested = Signal()
@@ -121,15 +128,17 @@ class LoginScreen(QWidget):
 
         # --- Back button ---
         back_row = QHBoxLayout()
-        self.btn_back = QPushButton("← BACK")
-        self.btn_back.setFixedSize(100, 36)
+        self.btn_back = QPushButton("BACK")
+        self.btn_back.setIcon(qta.icon("mdi.arrow-left", color=TEXT_MUTED))
+        self.btn_back.setIconSize(QSize(16, 16))
+        self.btn_back.setFixedSize(110, 36)
         self.btn_back.setStyleSheet(f"""
             QPushButton {{
                 background: transparent;
                 border: none;
                 color: {TEXT_MUTED};
                 letter-spacing: 2px;
-                font-size: 12px;
+                font-size: 15px;
             }}
             QPushButton:hover {{ color: {CYAN}; }}
         """)
@@ -172,7 +181,7 @@ class LoginScreen(QWidget):
             border: none;
             background: transparent;
             font-family: 'Orbitron', 'JetBrains Mono', monospace;
-            font-size: 24px;
+            font-size: 30px;
             font-weight: 900;
         """)
         cl.addWidget(title)
@@ -189,7 +198,7 @@ class LoginScreen(QWidget):
             color: {TEXT_SECONDARY};
             border: none;
             background: transparent;
-            font-size: 14px;
+            font-size: 17px;
         """)
         cl.addWidget(desc)
         self._desc_lbl = desc
@@ -204,14 +213,14 @@ class LoginScreen(QWidget):
         chips_row.setSpacing(10)
         chips_row.setAlignment(Qt.AlignCenter)
         for label, color in [("GPU Accelerated", NEON_GREEN), ("Scalable", CYAN), ("Secure", PURPLE)]:
-            chip = QLabel(f"● {label}")
+            chip = QLabel(label)
             chip.setStyleSheet(f"""
                 color: {color};
                 background: {color}22;
                 border: 1px solid {color}55;
                 border-radius: 12px;
                 padding: 4px 12px;
-                font-size: 12px;
+                font-size: 15px;
             """)
             chips_row.addWidget(chip)
         cl.addLayout(chips_row)
@@ -227,7 +236,7 @@ class LoginScreen(QWidget):
                 border-radius: 27px;
                 color: {TEXT_PRIMARY};
                 font-family: 'JetBrains Mono', monospace;
-                font-size: 14px;
+                font-size: 17px;
                 font-weight: bold;
                 letter-spacing: 1px;
             }}
@@ -248,7 +257,7 @@ class LoginScreen(QWidget):
 
         self.status_lbl = QLabel("")
         self.status_lbl.setAlignment(Qt.AlignCenter)
-        self.status_lbl.setStyleSheet(f"color: {TEXT_MUTED}; border: none; background: transparent; font-size: 13px;")
+        self.status_lbl.setStyleSheet(f"color: {TEXT_MUTED}; border: none; background: transparent; font-size: 16px;")
         cl.addWidget(self.status_lbl)
 
         root.addWidget(card, alignment=Qt.AlignCenter)
@@ -256,7 +265,7 @@ class LoginScreen(QWidget):
 
         footer = QLabel("Your data is not stored locally  ·  OAuth 2.0 Secured")
         footer.setAlignment(Qt.AlignCenter)
-        footer.setStyleSheet(f"color: {TEXT_MUTED}; font-size: 11px;")
+        footer.setStyleSheet(f"color: {TEXT_MUTED}; font-size: 13px;")
         root.addWidget(footer)
 
     def _on_back(self):
@@ -267,7 +276,7 @@ class LoginScreen(QWidget):
         self.btn_google.setEnabled(False)
         self._set_status("Opening browser for authentication...", TEXT_SECONDARY)
 
-        # Run auth in background thread — browser will open automatically
+        # Run auth in background thread - browser will open automatically
         self._thread = QThread()
         self._worker = AuthWorker()
         self._worker.moveToThread(self._thread)
@@ -294,13 +303,13 @@ class LoginScreen(QWidget):
     def _on_auth_success(self, manager):
         self._dot_timer.stop()
         self.btn_google.setEnabled(True)
-        self._set_status("✓ Authenticated successfully!", NEON_GREEN)
+        self._set_status("Authenticated successfully!", NEON_GREEN)
         QTimer.singleShot(800, lambda: self.login_success.emit(manager))
 
     def _on_auth_error(self, message: str):
         self._dot_timer.stop()
         self.btn_google.setEnabled(True)
-        self._set_status(f"✗ {message}", NEON_ORANGE)
+        self._set_status(message, NEON_ORANGE)
 
     def set_error(self, message: str):
         self._on_auth_error(message)
@@ -308,5 +317,5 @@ class LoginScreen(QWidget):
     def _set_status(self, text: str, color: str):
         self.status_lbl.setText(text)
         self.status_lbl.setStyleSheet(
-            f"color: {color}; border: none; background: transparent; font-size: 13px;"
+            f"color: {color}; border: none; background: transparent; font-size: 16px;"
         )

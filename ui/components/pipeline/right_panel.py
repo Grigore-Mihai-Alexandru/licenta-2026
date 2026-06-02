@@ -1,18 +1,20 @@
 import os
 
-from PySide6.QtWidgets import QWidget, QVBoxLayout, QSizePolicy
+from PySide6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QSizePolicy
 from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWebEngineCore import QWebEngineSettings
-from PySide6.QtCore import QUrl
+from PySide6.QtCore import Qt, QUrl, Signal
 
-from ui.styles.theme import BG_DEEP, TEXT_MUTED, TEXT_SECONDARY
+from ui.styles.theme import BG_DEEP, TEXT_MUTED, TEXT_SECONDARY, NEON_ORANGE, BORDER_BRIGHT
 from ui.components.pipeline.helpers import section_label, card
 
 
 class RightPanel(QWidget):
+    cleared = Signal()   # emitted when the user clicks Clear
+
     def __init__(self, base_dir: str, parent=None):
         super().__init__(parent)
-        # base_dir is ui/screens/ — viewer lives at project_root/viewer/
+        # base_dir is ui/screens/ - viewer lives at project_root/viewer/
         self._viewer_path = os.path.normpath(
             os.path.join(base_dir, "..", "..", "viewer", "index.html")
         )
@@ -38,6 +40,7 @@ class RightPanel(QWidget):
 
     def clear_models(self):
         self.web_view.page().runJavaScript("window.clearModels()")
+        self.cleared.emit()
 
     # -- Build -----------------------------------------------------------------
 
@@ -46,7 +49,33 @@ class RightPanel(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(10)
 
-        layout.addWidget(section_label("3D VIEWER"))
+        # Header row: section label + clear button
+        header_row = QHBoxLayout()
+        header_row.setContentsMargins(0, 0, 0, 0)
+        header_row.addWidget(section_label("3D VIEWER"))
+        header_row.addStretch()
+
+        btn_clear = QPushButton("Clear")
+        btn_clear.setFixedHeight(24)
+        btn_clear.setCursor(Qt.PointingHandCursor)
+        btn_clear.setStyleSheet(f"""
+            QPushButton {{
+                background: transparent;
+                border: 1px solid {BORDER_BRIGHT};
+                border-radius: 5px;
+                color: {TEXT_MUTED};
+                font-size: 11px;
+                padding: 2px 10px;
+            }}
+            QPushButton:hover {{
+                border-color: {NEON_ORANGE};
+                color: {NEON_ORANGE};
+            }}
+        """)
+        btn_clear.clicked.connect(self.clear_models)
+        header_row.addWidget(btn_clear)
+
+        layout.addLayout(header_row)
         layout.addSpacing(4)
 
         viewer_frame = card()

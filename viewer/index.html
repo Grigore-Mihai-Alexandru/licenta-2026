@@ -10,7 +10,7 @@
         body { background: #06060F; overflow: hidden; font-family: 'Consolas', monospace; }
         canvas { display: block; width: 100vw; height: 100vh; }
 
-        /* ── Sidebar ── */
+        /* -- Sidebar -- */
         #sidebar {
             position: absolute;
             top: 12px; left: 12px;
@@ -37,7 +37,7 @@
         .model-btn:hover  { border-color: #B07818; color: #E8A020; background: #E8A02015; }
         .model-btn.active { border-color: #E8A020; color: #E8A020; background: #E8A02015; }
 
-        /* ── Top-right controls ── */
+        /* -- Top-right controls -- */
         #overlay {
             position: absolute;
             top: 12px; right: 12px;
@@ -58,7 +58,7 @@
         }
         .overlay-btn:hover { border-color: #E8A020; color: #E8A020; }
 
-        /* ── Empty state ── */
+        /* -- Empty state -- */
         #empty {
             position: absolute;
             top: 50%; left: 50%;
@@ -71,7 +71,7 @@
         #empty .main { font-size: 14px; }
         #empty .sub  { font-size: 11px; color: #1E1E38; margin-top: 6px; }
 
-        /* ── Loading ── */
+        /* -- Loading -- */
         #loader {
             display: none;
             position: absolute;
@@ -111,7 +111,7 @@
         import { OBJLoader }     from 'three/addons/loaders/OBJLoader.js';
         import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 
-        // ── Renderer / Scene / Camera ─────────────────────────────────────
+        // -- Renderer / Scene / Camera -------------------------------------
 
         const renderer = new THREE.WebGLRenderer({ antialias: true });
         renderer.setPixelRatio(window.devicePixelRatio);
@@ -145,7 +145,7 @@
         grid.material.transparent = true;
         scene.add(grid);
 
-        // ── Model registry ────────────────────────────────────────────────
+        // -- Model registry ------------------------------------------------
         // { key: { label, object3D, visible } }
         const models = {};
 
@@ -242,7 +242,7 @@
             refreshUI();
         }
 
-        // ── Loaders ───────────────────────────────────────────────────────
+        // -- Loaders -------------------------------------------------------
 
         function loadGLB(key, url, label) {
             document.getElementById('loader').style.display = 'block';
@@ -270,7 +270,7 @@
             );
         }
 
-        // ── Public API ────────────────────────────────────────────────────
+        // -- Public API ----------------------------------------------------
 
         window.addModel = function(url, label) {
             if (!url) return;
@@ -291,7 +291,7 @@
             refreshUI();
         };
 
-        // ── Render loop ───────────────────────────────────────────────────
+        // -- Render loop ---------------------------------------------------
 
         (function animate() {
             requestAnimationFrame(animate);

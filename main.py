@@ -1,25 +1,38 @@
-# main.py — Entry point, manages screen navigation via QStackedWidget
+# main.py - Entry point, manages screen navigation via QStackedWidget
 
 import sys
 import os
 
-from PySide6.QtWidgets import QApplication, QMainWindow, QStackedWidget
-from PySide6.QtGui import QFontDatabase
+from PySide6.QtWidgets import QApplication, QMainWindow, QStackedWidget, QSystemTrayIcon, QMenu
+from PySide6.QtGui import QFontDatabase, QIcon, QPixmap, QColor, QPainter
+from PySide6.QtCore import Qt
 
 from ui.screens.welcome_screen import WelcomeScreen
 from ui.screens.login_screen import LoginScreen
 from ui.screens.pipeline_screen import PipelineScreen
-from ui.styles.theme import GLOBAL_QSS
+from ui.styles.theme import GLOBAL_QSS, CYAN
 
-SCREEN_WELCOME  = 0
-SCREEN_LOGIN    = 1
-SCREEN_PIPELINE = 2
+SCREEN_WELCOME = 0
+SCREEN_LOGIN   = 1
+
+
+def _make_tray_icon() -> QIcon:
+    """Create a small amber square as the system tray icon (no file dependency)."""
+    px = QPixmap(16, 16)
+    px.fill(Qt.transparent)
+    p = QPainter(px)
+    p.setRenderHint(QPainter.Antialiasing)
+    p.setBrush(QColor(CYAN))
+    p.setPen(Qt.NoPen)
+    p.drawRoundedRect(1, 1, 14, 14, 3, 3)
+    p.end()
+    return QIcon(px)
 
 
 class AppWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Neural Forge — AI 3D Pipeline")
+        self.setWindowTitle("Neural Forge - AI 3D Pipeline")
         self.resize(1600, 900)
         self.setMinimumSize(1100, 700)
 
@@ -27,39 +40,98 @@ class AppWindow(QMainWindow):
         self.credentials = None
         self.user_info   = {}
 
+        # Persistent pipeline screens - keep alive when user goes home
+        self._pipeline_screens: dict[str, PipelineScreen] = {}
+
         self.stack = QStackedWidget()
         self.setCentralWidget(self.stack)
 
         self.welcome = WelcomeScreen()
         self.login   = LoginScreen()
 
-        self.stack.addWidget(self.welcome)  # 0
-        self.stack.addWidget(self.login)    # 1
+        self.stack.addWidget(self.welcome)  # index 0
+        self.stack.addWidget(self.login)    # index 1
 
         self.welcome.local_selected.connect(self._on_local)
         self.welcome.remote_selected.connect(self._on_remote)
-        self.login.back_requested.connect(lambda: self.stack.setCurrentIndex(SCREEN_WELCOME))
+        self.login.back_requested.connect(self._go_home)
         self.login.login_success.connect(self._on_login_success)
 
         self.stack.setCurrentIndex(SCREEN_WELCOME)
 
+        # System tray for job notifications
+        self._setup_tray()
+
+    # -- Tray ------------------------------------------------------------------
+
+    def _setup_tray(self):
+        self._tray = QSystemTrayIcon(self)
+        self._tray.setIcon(_make_tray_icon())
+        self._tray.setToolTip("Neural Forge")
+
+        tray_menu = QMenu()
+        act_show = tray_menu.addAction("Show Neural Forge")
+        act_show.triggered.connect(self._bring_to_front)
+        tray_menu.addSeparator()
+        act_quit = tray_menu.addAction("Quit")
+        act_quit.triggered.connect(QApplication.quit)
+
+        self._tray.setContextMenu(tray_menu)
+        self._tray.activated.connect(
+            lambda reason: self._bring_to_front()
+            if reason == QSystemTrayIcon.DoubleClick else None
+        )
+        self._tray.show()
+
+    def notify(self, title: str, message: str):
+        """Show a system tray balloon notification."""
+        if QSystemTrayIcon.isSystemTrayAvailable() and self._tray.isVisible():
+            self._tray.showMessage(title, message, QSystemTrayIcon.Information, 5000)
+
+    def _bring_to_front(self):
+        self.showNormal()
+        self.raise_()
+        self.activateWindow()
+
+    # -- Navigation -------------------------------------------------------------
+
+    def _go_home(self):
+        self.stack.setCurrentWidget(self.welcome)
+
+    def _on_remote(self):
+        self.run_mode = "remote"
+        self.stack.setCurrentWidget(self.login)
+
     def _on_local(self):
         from PySide6.QtCore import QSettings
-        from ui.components.DockerWarningDialog import DockerWarningDialog
+        from ui.components.DockerWarningDialog import (
+            DockerWarningDialog, DockerStartDialog, check_docker_running, find_docker_desktop,
+        )
+
+        # 1. Check if Docker is reachable
+        docker_ok = check_docker_running()
+
+        if not docker_ok:
+            # Determine whether Docker is missing entirely or just not started
+            docker_path = find_docker_desktop()
+            dlg = DockerStartDialog(docker_missing=(docker_path is None), parent=self)
+            if dlg.exec() != DockerStartDialog.Accepted:
+                return
+            # User waited for Docker to start - verify once more
+            if not check_docker_running():
+                return
+
+        # 2. Show one-time prerequisites checklist (has "don't show again")
         settings = QSettings("NeuralForge", "App")
         if not DockerWarningDialog.run_if_needed(settings, self):
             return
+
         self.run_mode  = "local"
         self.user_info = {}
         self._launch_pipeline()
 
-    def _on_remote(self):
-        self.run_mode = "remote"
-        self.stack.setCurrentIndex(SCREEN_LOGIN)
-
     def _on_login_success(self, manager):
         self.credentials = manager
-        # Fetch name, email, avatar from Google
         try:
             self.user_info = manager.get_user_info()
             print(f"[App] Logged in as: {self.user_info.get('name')} ({self.user_info.get('email')})")
@@ -68,19 +140,40 @@ class AppWindow(QMainWindow):
             self.user_info = {}
         self._launch_pipeline()
 
+    # -- Sign-out ---------------------------------------------------------------
+
+    def _on_signed_out(self, mode: str):
+        """Discard the pipeline screen and credentials so next login starts fresh."""
+        if mode in self._pipeline_screens:
+            widget = self._pipeline_screens.pop(mode)
+            self.stack.removeWidget(widget)
+            widget.deleteLater()
+        self.credentials = None
+        self.user_info   = {}
+        self._go_home()
+
+    # -- Pipeline screen management ---------------------------------------------
+
     def _launch_pipeline(self):
-        if self.stack.count() > 2:
-            old = self.stack.widget(2)
-            self.stack.removeWidget(old)
-            old.deleteLater()
+        mode = self.run_mode
+
+        if mode in self._pipeline_screens:
+            # Reuse existing screen - preserves in-flight jobs
+            self.stack.setCurrentWidget(self._pipeline_screens[mode])
+            return
 
         pipeline = PipelineScreen(
-            run_mode=self.run_mode,
+            run_mode=mode,
             credentials=self.credentials,
             user_info=self.user_info,
         )
+        pipeline.home_requested.connect(self._go_home)
+        pipeline.notification.connect(self.notify)
+        pipeline.signed_out.connect(lambda: self._on_signed_out("remote"))
+
+        self._pipeline_screens[mode] = pipeline
         self.stack.addWidget(pipeline)
-        self.stack.setCurrentIndex(SCREEN_PIPELINE)
+        self.stack.setCurrentWidget(pipeline)
 
 
 def _load_fonts():
@@ -98,6 +191,8 @@ if __name__ == "__main__":
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
     app.setStyleSheet(GLOBAL_QSS)
+    # Keep app alive when all windows are minimised to tray
+    app.setQuitOnLastWindowClosed(False)
 
     _load_fonts()
 

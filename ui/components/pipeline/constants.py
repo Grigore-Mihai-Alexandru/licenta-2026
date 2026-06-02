@@ -29,17 +29,20 @@ COMBO_STYLE = f"""
         border: 1px solid {BORDER_BRIGHT};
         border-radius: 6px;
         color: {TEXT_PRIMARY};
-        padding: 6px 10px;
-        font-size: 12px;
+        padding: 8px 12px;
+        font-size: 15px;
         font-family: 'JetBrains Mono', monospace;
+        min-height: 36px;
     }}
     QComboBox:hover {{ border-color: {CYAN}; }}
-    QComboBox::drop-down {{ border: none; width: 24px; }}
+    QComboBox::drop-down {{ border: none; width: 28px; }}
     QComboBox QAbstractItemView {{
         background: {BG_ELEVATED};
         color: {TEXT_PRIMARY};
         border: 1px solid {BORDER_BRIGHT};
         selection-background-color: {CYAN_GLOW};
         selection-color: {CYAN};
+        font-size: 15px;
+        padding: 4px;
     }}
 """

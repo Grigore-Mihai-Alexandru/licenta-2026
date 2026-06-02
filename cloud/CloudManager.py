@@ -1,12 +1,61 @@
+import hashlib
 import os
 import pickle
 from google_auth_oauthlib.flow import InstalledAppFlow
-from google.auth.transport.requests import Request
+from google.auth.transport.requests import Request, AuthorizedSession
 from googleapiclient.discovery import build
 from google.cloud import storage
-from google.cloud import aiplatform
 
 from CloudBudgetManager import CloudBudgetManager, DEFAULT_MONTHLY_LIMIT_USD
+
+
+class _JobState:
+    """Thin wrapper so callers can do  job.state.name  like the SDK."""
+    def __init__(self, name: str):
+        self.name = name
+
+
+class _VertexJob:
+    """
+    Drop-in replacement for the high-level SDK CustomJob.
+    Uses the Vertex AI REST API directly - no staging bucket required.
+    """
+    def __init__(self, data: dict, session: AuthorizedSession, vertex_region: str):
+        self._data    = data
+        self._session = session
+        self._region  = vertex_region
+        self.resource_name = data["name"]
+
+    @property
+    def state(self) -> _JobState:
+        return _JobState(self._data.get("state", "JOB_STATE_UNSPECIFIED"))
+
+    def refresh(self):
+        url  = f"https://{self._region}-aiplatform.googleapis.com/v1/{self.resource_name}"
+        resp = self._session.get(url)
+        resp.raise_for_status()
+        self._data = resp.json()
+
+    @property
+    def error_message(self) -> str:
+        err = self._data.get("error")
+        if not err:
+            return ""
+        msg     = err.get("message", "")
+        details = err.get("details", [])
+        for d in details:
+            for v in d.get("violations", []):
+                desc = v.get("description", "")
+                if desc:
+                    msg += f" | {desc}"
+        return msg
+
+    def cancel(self):
+        url = f"https://{self._region}-aiplatform.googleapis.com/v1/{self.resource_name}:cancel"
+        try:
+            self._session.post(url)
+        except Exception:
+            pass
 
 
 class CloudManager:
@@ -21,10 +70,19 @@ class CloudManager:
             "https://www.googleapis.com/auth/userinfo.profile",
             "openid",
         ]
-        self.creds       = None
-        self.project_id  = None
-        self.bucket_name = None
-        self.region      = "europe-west4"
+        self.creds                   = None
+        self.project_id              = None
+        self.bucket_name             = None
+        self.region                  = "europe-west3"  # GCS data bucket region
+        self.vertex_region           = "us-central1"   # Vertex AI job region (GPU availability)
+        self.registry_region         = "europe-west4"  # Artifact Registry region (existing image)
+        self._user_prefix            = "shared"        # overridden by set_user_prefix()
+        self._persistent_resource_id  = None   # set via use_persistent_resource()
+        self._persistent_gpu_type    = "L4"   # matches GPU type of the persistent resource
+
+    def set_user_prefix(self, email: str):
+        """Namespace every GCS path per user - prevents collisions when two users upload same filename."""
+        self._user_prefix = hashlib.sha256(email.lower().encode()).hexdigest()[:8]
 
     # -- Auth ------------------------------------------------------------------
 
@@ -132,12 +190,13 @@ class CloudManager:
 
         client    = storage.Client(credentials=self.creds, project=self.project_id)
         file_name = os.path.basename(local_file_path)
-        blob      = client.bucket(self.bucket_name).blob(f"inputs/{file_name}")
+        blob_path = f"inputs/{self._user_prefix}/{file_name}"
+        blob      = client.bucket(self.bucket_name).blob(blob_path)
 
-        print(f"Uploading {file_name} to GCS...")
+        print(f"Uploading {file_name} to GCS [{self._user_prefix}]...")
         blob.upload_from_filename(local_file_path)
 
-        uri = f"gs://{self.bucket_name}/inputs/{file_name}"
+        uri = f"gs://{self.bucket_name}/{blob_path}"
         print(f"Available at: {uri}")
         return uri
 
@@ -150,15 +209,18 @@ class CloudManager:
 
         client     = self._gcs_client()
         bucket     = client.bucket(self.bucket_name)
-        blobs      = list(bucket.list_blobs(prefix="outputs/"))
+        prefix     = f"outputs/{self._user_prefix}/"
+        blobs      = list(bucket.list_blobs(prefix=prefix))
         os.makedirs(local_output_dir, exist_ok=True)
         downloaded = []
 
         for blob in blobs:
-            file_name = os.path.basename(blob.name)
-            if not file_name:
-                continue
-            local_path = os.path.join(local_output_dir, file_name)
+            # Keep subdirectory structure: strip only the GCS prefix, recreate the rest locally
+            rel_path = blob.name[len(prefix):]
+            if not rel_path or rel_path.endswith("/"):
+                continue  # skip virtual directory blobs
+            local_path = os.path.join(local_output_dir, rel_path.replace("/", os.sep))
+            os.makedirs(os.path.dirname(local_path), exist_ok=True)
             print(f"[GCS] Downloading {blob.name} -> {local_path}")
             blob.download_to_filename(local_path)
             downloaded.append(local_path)
@@ -177,12 +239,12 @@ class CloudManager:
 
     def delete_gcs_inputs(self, filename: str = None):
         if filename:
-            self.delete_gcs_prefix(f"inputs/{filename}")
+            self.delete_gcs_prefix(f"inputs/{self._user_prefix}/{filename}")
         else:
-            self.delete_gcs_prefix("inputs/")
+            self.delete_gcs_prefix(f"inputs/{self._user_prefix}/")
 
     def delete_gcs_outputs(self):
-        self.delete_gcs_prefix("outputs/")
+        self.delete_gcs_prefix(f"outputs/{self._user_prefix}/")
 
     # -- Budget ----------------------------------------------------------------
 
@@ -201,6 +263,100 @@ class CloudManager:
             project_id=self.project_id,
             monthly_limit=monthly_limit,
         )
+
+    # -- Persistent Resource ---------------------------------------------------
+
+    def use_persistent_resource(self, resource_id: str, gpu_type: str = None):
+        """Tell the manager to route all future jobs through this persistent resource."""
+        if self._persistent_resource_id != resource_id:
+            print(f"[GPU] Using persistent resource: {resource_id} ({gpu_type or self._persistent_gpu_type})")
+        self._persistent_resource_id = resource_id
+        if gpu_type:
+            self._persistent_gpu_type = gpu_type.upper()
+
+    def _vertex_base_url(self) -> str:
+        return (
+            f"https://{self.vertex_region}-aiplatform.googleapis.com/v1"
+            f"/projects/{self.project_id}/locations/{self.vertex_region}"
+        )
+
+    def create_persistent_resource(self, resource_id: str = "demo-gpu") -> str:
+        """
+        Provision a persistent L4 GPU cluster in us-central1.
+        The cluster stays alive between jobs - jobs start in ~15-30s instead of 2-5 min.
+        Takes ~5 minutes to become RUNNING the first time.
+        Returns resource_id.
+        """
+        if not self.project_id:
+            self.get_project_info()
+
+        session = AuthorizedSession(self.creds)
+        url = f"{self._vertex_base_url()}/persistentResources?persistentResourceId={resource_id}"
+        body = {
+            "resourcePools": [{
+                "machineSpec": {
+                    "machineType":      "g2-standard-4",
+                    "acceleratorType":  "NVIDIA_L4",
+                    "acceleratorCount": 1,
+                },
+                "replicaCount": "1",
+                "diskSpec": {
+                    "bootDiskType":   "pd-ssd",
+                    "bootDiskSizeGb": 200,
+                },
+            }]
+        }
+        resp = session.post(url, json=body)
+        if not resp.ok:
+            print(f"[GPU] API error {resp.status_code}: {resp.text}")
+            resp.raise_for_status()
+        print(f"[GPU] PersistentResource '{resource_id}' is provisioning (~5 min to become RUNNING).")
+        self._persistent_resource_id = resource_id
+        return resource_id
+
+    def get_persistent_resource_state(self, resource_id: str = None) -> str:
+        """
+        Returns the state string of the persistent resource:
+        PROVISIONING, RUNNING, STOPPING, STOPPED, ERROR, or NOT_FOUND.
+        """
+        rid = resource_id or self._persistent_resource_id
+        if not rid:
+            return "NOT_FOUND"
+        if not self.project_id:
+            self.get_project_info()
+        try:
+            session = AuthorizedSession(self.creds)
+            url = f"{self._vertex_base_url()}/persistentResources/{rid}"
+            resp = session.get(url)
+            if resp.status_code == 404:
+                return "NOT_FOUND"
+            resp.raise_for_status()
+            data = resp.json()
+            if data.get("error"):
+                print(f"[GPU] Resource error detail: {data['error']}")
+            return data.get("state", "UNKNOWN")
+        except Exception as e:
+            print(f"[GPU] Could not get resource state: {e}")
+            return "UNKNOWN"
+
+    def delete_persistent_resource(self, resource_id: str = None):
+        """
+        Shut down and delete the persistent GPU cluster.
+        Call this when the demo is done to stop all charges.
+        """
+        rid = resource_id or self._persistent_resource_id
+        if not rid:
+            print("[GPU] No persistent resource to delete.")
+            return
+        if not self.project_id:
+            self.get_project_info()
+        session = AuthorizedSession(self.creds)
+        url = f"{self._vertex_base_url()}/persistentResources/{rid}"
+        resp = session.delete(url)
+        resp.raise_for_status()
+        print(f"[GPU] PersistentResource '{rid}' deletion started. All GPU charges stop once it reaches STOPPED.")
+        if rid == self._persistent_resource_id:
+            self._persistent_resource_id = None
 
     # -- Vertex AI job ---------------------------------------------------------
 
@@ -227,28 +383,31 @@ class CloudManager:
             raise ValueError(f"Unknown gpu_type '{gpu_type}'. Choose 'L4' or 'T4'.")
 
         if budget_manager is not None:
-            allowed, cost, remaining = budget_manager.can_submit(gpu_type, refine, wonder3d_mode)
+            allowed, cost, remaining = budget_manager.can_submit(
+                gpu_type, refine, wonder3d_mode, crop=crop_size
+            )
             if not allowed:
                 summary = budget_manager.summary()
                 raise RuntimeError(
-                    f"Budget exceeded. Estimated cost: ${cost:.2f}, "
-                    f"remaining: ${remaining:.2f} / ${summary['monthly_limit_usd']:.2f} "
+                    f"Budget exceeded. Estimated cost: ${cost:.4f}, "
+                    f"remaining: ${remaining:.4f} / ${summary['monthly_limit_usd']:.2f} "
                     f"(resets on the 1st of next month)"
                 )
-            print(f"[BUDGET] Estimated cost: ${cost:.2f} | Remaining after job: ${remaining - cost:.2f}")
+            from CloudBudgetManager import estimate_runtime_minutes
+            est_min = estimate_runtime_minutes(refine, crop_size, wonder3d_mode)
+            print(
+                f"[BUDGET] Estimated cost: ${cost:.4f} (~{est_min:.1f} min) | "
+                f"Remaining after job: ${remaining - cost:.4f}"
+            )
 
         if not self.project_id:
             self.get_project_info()
 
-        aiplatform.init(
-            project=self.project_id,
-            location=self.region,
-            credentials=self.creds,
-        )
+        machine_type, accelerator_type = gpu_configs[gpu_type]
 
         args = [
             "--input_image",     input_uri,
-            "--output_dir",      f"gs://{self.bucket_name}/outputs",
+            "--output_dir",      f"gs://{self.bucket_name}/outputs/{self._user_prefix}",
             "--crop",            str(crop_size),
             "--refine",          str(refine),
             "--mesh_faces",      str(mesh_faces),
@@ -261,31 +420,50 @@ class CloudManager:
         if not mesh_optimize:
             args.append("--skip_mesh")
 
-        machine_type, accelerator_type = gpu_configs[gpu_type]
+        job_spec = {
+            "workerPoolSpecs": [{
+                "machineSpec": {
+                    "machineType":      machine_type,
+                    "acceleratorType":  accelerator_type,
+                    "acceleratorCount": 1,
+                },
+                "replicaCount": "1",
+                "diskSpec": {
+                    "bootDiskType":   "pd-ssd",
+                    "bootDiskSizeGb": 200,
+                },
+                "containerSpec": {
+                    "imageUri": image_uri,
+                    "args":     args,
+                },
+            }],
+        }
+        if self._persistent_resource_id:
+            job_spec["persistentResourceId"] = self._persistent_resource_id
 
-        worker_pool_specs = [{
-            "machine_spec": {
-                "machine_type":      machine_type,
-                "accelerator_type":  accelerator_type,
-                "accelerator_count": 1,
-            },
-            "replica_count": 1,
-            "container_spec": {"image_uri": image_uri, "args": args},
-        }]
+        body = {
+            "displayName": f"ai_recon_{os.path.basename(input_uri)}",
+            "jobSpec": job_spec,
+        }
+
+        session = AuthorizedSession(self.creds)
+        url = (
+            f"https://{self.vertex_region}-aiplatform.googleapis.com/v1"
+            f"/projects/{self.project_id}/locations/{self.vertex_region}/customJobs"
+        )
 
         print(f"Submitting Vertex AI job ({gpu_type}, wonder3d={wonder3d_mode}, tasks={restormer_tasks})...")
-        job = aiplatform.CustomJob(
-            display_name=f"ai_recon_{os.path.basename(input_uri)}",
-            worker_pool_specs=worker_pool_specs,
-            staging_bucket=f"gs://{self.bucket_name}/staging",
-        )
-        job.run(sync=False)
-        print(f"Job submitted: {job.resource_name}")
+        resp = session.post(url, json=body)
+        resp.raise_for_status()
+        data = resp.json()
+        print(f"Job submitted: {data['name']}")
+
+        job = _VertexJob(data, session, self.vertex_region)
 
         if budget_manager is not None:
             job_name = job.resource_name.split("/")[-1]
-            cost     = budget_manager.record_job(gpu_type, refine, job_name, wonder3d_mode)
-            print(f"[BUDGET] Recorded ${cost:.3f} for job {job_name}")
+            cost     = budget_manager.record_job(gpu_type, refine, job_name, wonder3d_mode, crop=crop_size)
+            print(f"[BUDGET] Recorded ${cost:.4f} for job {job_name}")
 
         return job
 
@@ -296,7 +474,7 @@ class CloudManager:
             self.get_project_info()
 
         service = build("artifactregistry", "v1", credentials=self.creds)
-        parent  = f"projects/{self.project_id}/locations/{self.region}"
+        parent  = f"projects/{self.project_id}/locations/{self.registry_region}"
         repo_id = f"{parent}/repositories/{repo_name}"
 
         try:
@@ -311,7 +489,7 @@ class CloudManager:
             ).execute()
             print("Repository created.")
 
-        return f"{self.region}-docker.pkg.dev/{self.project_id}/{repo_name}/ai-pipeline:v1"
+        return f"{self.registry_region}-docker.pkg.dev/{self.project_id}/{repo_name}/ai-pipeline:v1"
 
 
 if __name__ == "__main__":

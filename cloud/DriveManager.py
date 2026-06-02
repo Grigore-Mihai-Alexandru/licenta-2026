@@ -1,8 +1,10 @@
-# DriveManager.py — Google Drive integration: upload results + download to PC
+# DriveManager.py - Google Drive integration: upload results + download to PC
 
 import os
 import io
+import time
 from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaFileUpload, MediaIoBaseDownload
 
 FOLDER_NAME = "Neural Forge"
@@ -85,24 +87,50 @@ class DriveManager:
             folder_id = self.get_or_create_folder()
         file_name = os.path.basename(local_path)
         mime_type = _mime_for(local_path)
-
-        metadata = {"name": file_name, "parents": [folder_id]}
-        media    = MediaFileUpload(local_path, mimetype=mime_type, resumable=True)
-
-        request  = self.service.files().create(
-            body=metadata, media_body=media,
-            fields="id, name, webViewLink, size"
-        )
+        metadata  = {"name": file_name, "parents": [folder_id]}
 
         print(f"[DRIVE] Uploading {file_name}...")
-        response = None
-        while response is None:
-            status, response = request.next_chunk()
-            if status and progress_callback:
-                progress_callback(file_name, int(status.progress() * 100))
 
-        print(f"   {file_name} → {response.get('webViewLink', '')}")
-        return response
+        for session_attempt in range(1, 6):
+            # Fresh MediaFileUpload + request each session attempt (required for 410 restart)
+            media   = MediaFileUpload(local_path, mimetype=mime_type, resumable=True)
+            request = self.service.files().create(
+                body=metadata, media_body=media,
+                fields="id, name, webViewLink, size"
+            )
+
+            response      = None
+            chunk_retries = 0
+            session_ok    = True
+
+            while response is None:
+                try:
+                    status, response = request.next_chunk()
+                    if status and progress_callback:
+                        progress_callback(file_name, int(status.progress() * 100))
+                    chunk_retries = 0
+                except HttpError as e:
+                    if e.resp.status == 410:
+                        # Session expired - must restart with a new session URI
+                        wait = 2 ** session_attempt
+                        print(f"[DRIVE] Session expired (410), restarting upload in {wait}s… "
+                              f"(attempt {session_attempt}/5)")
+                        time.sleep(wait)
+                        session_ok = False
+                        break
+                    elif e.resp.status in (500, 502, 503, 504) and chunk_retries < 4:
+                        chunk_retries += 1
+                        wait = 2 ** chunk_retries
+                        print(f"[DRIVE] Transient {e.resp.status}, retry {chunk_retries}/4 in {wait}s…")
+                        time.sleep(wait)
+                    else:
+                        raise
+
+            if session_ok and response is not None:
+                print(f"   {file_name} -> {response.get('webViewLink', '')}")
+                return response
+
+        raise RuntimeError(f"Upload failed after 5 session attempts: {file_name}")
 
     def upload_results(self, file_paths: list[str], progress_callback=None) -> list[dict]:
         uploaded = []
@@ -116,17 +144,65 @@ class DriveManager:
 
     def upload_results_for_job(self, file_paths: list[str], job_name: str,
                                progress_callback=None) -> list[dict]:
-        """Upload all result files into 'Neural Forge/<job_name>/'."""
-        folder_id = self.get_or_create_job_folder(job_name)
+        """Upload all result files into 'Neural Forge/<job_name>/' preserving subdirectory structure."""
+        job_folder_id = self.get_or_create_job_folder(job_name)
+
+        valid_paths = [p for p in file_paths if p and os.path.exists(p)]
+        if not valid_paths:
+            return []
+
+        # Derive the local job root so relative paths can be computed
+        base_dir = os.path.commonpath(valid_paths)
+        if not os.path.isdir(base_dir):
+            base_dir = os.path.dirname(base_dir)
+
+        folder_id_cache: dict[str, str] = {}
         uploaded = []
-        for path in file_paths:
-            if path and os.path.exists(path):
-                info = self.upload_file(path, folder_id=folder_id,
-                                        progress_callback=progress_callback)
-                uploaded.append(info)
+
+        for path in valid_paths:
+            rel  = os.path.relpath(path, base_dir)
+            rel_dir = os.path.dirname(rel)
+
+            if rel_dir and rel_dir != ".":
+                if rel_dir not in folder_id_cache:
+                    folder_id_cache[rel_dir] = self._get_or_create_path(job_folder_id, rel_dir)
+                target_id = folder_id_cache[rel_dir]
             else:
-                print(f"[DRIVE] Skipped (not found): {path}")
+                target_id = job_folder_id
+
+            info = self.upload_file(path, folder_id=target_id,
+                                    progress_callback=progress_callback)
+            uploaded.append(info)
+
         return uploaded
+
+    def _get_or_create_path(self, parent_id: str, rel_dir: str) -> str:
+        """Create Drive subfolder hierarchy for rel_dir under parent_id. Returns leaf folder ID."""
+        current_id = parent_id
+        for part in rel_dir.replace("\\", "/").split("/"):
+            if part and part != ".":
+                current_id = self._get_or_create_subfolder(current_id, part)
+        return current_id
+
+    def _get_or_create_subfolder(self, parent_id: str, name: str) -> str:
+        query = (
+            f"name='{name}' "
+            f"and mimeType='application/vnd.google-apps.folder' "
+            f"and '{parent_id}' in parents "
+            f"and trashed=false"
+        )
+        results = self.service.files().list(
+            q=query, spaces="drive", fields="files(id)"
+        ).execute()
+        files = results.get("files", [])
+        if files:
+            return files[0]["id"]
+        folder = self.service.files().create(
+            body={"name": name, "mimeType": "application/vnd.google-apps.folder",
+                  "parents": [parent_id]},
+            fields="id",
+        ).execute()
+        return folder["id"]
 
     # Download
 
@@ -142,7 +218,7 @@ class DriveManager:
                 if status and progress_callback:
                     progress_callback(os.path.basename(dest_path), int(status.progress() * 100))
 
-        print(f"[DRIVE] Downloaded → {dest_path}")
+        print(f"[DRIVE] Downloaded -> {dest_path}")
         return dest_path
 
     def download_results(

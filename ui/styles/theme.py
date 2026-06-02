@@ -1,4 +1,4 @@
-# theme.py — "Forge Dark" palette: near-black slate + amber-gold accent
+# theme.py - "Forge Dark" palette: near-black slate + amber-gold accent
 
 # -- Backgrounds ---------------------------------------------------------------
 BG_DEEP        = "#06060F"   # near-true black, faint purple undertone
@@ -11,19 +11,19 @@ BORDER         = "#1E1E38"   # subtle separator
 BORDER_BRIGHT  = "#2E2E52"   # visible border / focused ring
 
 # -- Primary accent: amber-gold (the "forge" element) -------------------------
-CYAN           = "#E8A020"   # amber-gold — used for all interactive highlights
+CYAN           = "#E8A020"   # amber-gold - used for all interactive highlights
 CYAN_DIM       = "#B07818"   # darker amber for pressed / dim states
 CYAN_GLOW      = "#E8A02015" # near-transparent amber for background glows
 
 # -- Semantic colors -----------------------------------------------------------
-PURPLE         = "#A855F7"   # violet — Drive / secondary actions
-NEON_GREEN     = "#10B981"   # emerald-teal — success / DONE states
-NEON_ORANGE    = "#EF5340"   # coral-red — errors / warnings
+PURPLE         = "#A855F7"   # violet - Drive / secondary actions
+NEON_GREEN     = "#10B981"   # emerald-teal - success / DONE states
+NEON_ORANGE    = "#EF5340"   # coral-red - errors / warnings
 
 # -- Text ----------------------------------------------------------------------
 TEXT_PRIMARY   = "#ECEAFF"   # cool white with faint violet tint
-TEXT_SECONDARY = "#7878A8"   # muted blue-gray
-TEXT_MUTED     = "#3C3C60"   # very dim, for labels and placeholders
+TEXT_SECONDARY = "#B8B8D8"   # readable blue-gray (was too dark)
+TEXT_MUTED     = "#8888B0"   # visibly muted but legible (was near-invisible)
 
 # -- Global QSS ----------------------------------------------------------------
 GLOBAL_QSS = f"""
@@ -31,7 +31,7 @@ QMainWindow, QWidget {{
     background-color: {BG_BASE};
     color: {TEXT_PRIMARY};
     font-family: 'JetBrains Mono', 'Consolas', monospace;
-    font-size: 13px;
+    font-size: 16px;
 }}
 QScrollBar:vertical {{
     background: {BG_SURFACE};
@@ -54,7 +54,7 @@ QPushButton {{
     border-radius: 8px;
     padding: 8px 18px;
     font-family: 'JetBrains Mono', monospace;
-    font-size: 12px;
+    font-size: 15px;
     letter-spacing: 1px;
 }}
 QPushButton:hover {{
@@ -70,7 +70,7 @@ QTextEdit {{
     border-radius: 8px;
     color: {TEXT_SECONDARY};
     padding: 10px;
-    font-size: 11px;
+    font-size: 14px;
     selection-background-color: {CYAN}44;
 }}
 QTextEdit:focus {{ border-color: {CYAN_DIM}; }}
@@ -81,6 +81,6 @@ QToolTip {{
     border: 1px solid {CYAN_DIM};
     border-radius: 6px;
     padding: 5px 9px;
-    font-size: 11px;
+    font-size: 13px;
 }}
 """

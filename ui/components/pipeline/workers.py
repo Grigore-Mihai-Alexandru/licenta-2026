@@ -6,18 +6,24 @@ from PySide6.QtCore import QObject, Signal
 
 
 # ---------------------------------------------------------------------------
-# Drive auth worker (local mode — no CloudManager available)
+# Drive auth worker (local mode - no CloudManager available)
 # ---------------------------------------------------------------------------
 
 class DriveAuthWorker(QObject):
     """
     Loads or creates Google OAuth credentials for Drive access.
     Reuses token.pickle so the user only authenticates once via browser.
+    Emits success(creds, email) - email may be empty if unavailable.
     """
-    success = Signal(object)  # emits google.oauth2.credentials.Credentials
+    success = Signal(object, str)  # (google.oauth2.credentials.Credentials, email)
     error   = Signal(str)
 
-    _SCOPES = ["https://www.googleapis.com/auth/drive.file"]
+    # Include identity scopes so we can show the connected email in the UI.
+    _SCOPES = [
+        "https://www.googleapis.com/auth/drive.file",
+        "https://www.googleapis.com/auth/userinfo.email",
+        "openid",
+    ]
 
     def __init__(self, secrets_path: str, token_path: str):
         super().__init__()
@@ -35,6 +41,16 @@ class DriveAuthWorker(QObject):
                 with open(self.token_path, "rb") as fh:
                     creds = pickle.load(fh)
 
+            # Force fresh auth if token is missing any required scope
+            if creds and creds.scopes:
+                required = {
+                    "https://www.googleapis.com/auth/drive.file",
+                    "https://www.googleapis.com/auth/userinfo.email",
+                    "openid",
+                }
+                if not required.issubset(creds.scopes):
+                    creds = None
+
             if not creds or not creds.valid:
                 if creds and creds.expired and creds.refresh_token:
                     try:
@@ -51,7 +67,17 @@ class DriveAuthWorker(QObject):
                 with open(self.token_path, "wb") as fh:
                     pickle.dump(creds, fh)
 
-            self.success.emit(creds)
+            # Try to extract the email so the UI can display it
+            email = ""
+            try:
+                from googleapiclient.discovery import build as _build
+                svc   = _build("oauth2", "v2", credentials=creds)
+                info  = svc.userinfo().get().execute()
+                email = info.get("email", "")
+            except Exception:
+                pass
+
+            self.success.emit(creds, email)
         except Exception as e:
             self.error.emit(str(e))
 
@@ -116,14 +142,31 @@ class DriveWorker(QObject):
             if cloud_dir not in sys.path:
                 sys.path.insert(0, cloud_dir)
             from DriveManager import DriveManager
+        except Exception as e:
+            msg = str(e).strip()
+            self.error.emit(f"Import error: {msg or type(e).__name__}")
+            return
+
+        try:
             dm = DriveManager(self.creds)
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            msg = str(e).strip()
+            self.error.emit(f"Drive init failed: {msg or type(e).__name__}")
+            return
+
+        try:
             uploaded = dm.upload_results_for_job(
                 self.file_paths, self.job_name,
                 progress_callback=self.progress.emit,
             )
             self.finished.emit(uploaded)
         except Exception as e:
-            self.error.emit(str(e))
+            import traceback
+            traceback.print_exc()
+            msg = str(e).strip()
+            self.error.emit(f"[{type(e).__name__}] {msg}" if msg else f"[{type(e).__name__}]")
 
 
 # ---------------------------------------------------------------------------
@@ -153,6 +196,14 @@ class DockerBuildWorker(QObject):
     def __init__(self, project_dir: str):
         super().__init__()
         self.project_dir = project_dir
+        self._proc       = None
+
+    def cancel(self):
+        if self._proc:
+            try:
+                self._proc.terminate()
+            except Exception:
+                pass
 
     def run(self):
         try:
@@ -162,12 +213,12 @@ class DockerBuildWorker(QObject):
                 capture_output=True,
             )
             if check.returncode == 0:
-                self.log.emit("[DOCKER] Image neural-forge:latest already exists — skipping build.")
+                self.log.emit("[DOCKER] Image neural-forge:latest already exists - skipping build.")
                 self.finished.emit(True)
                 return
 
             self.log.emit("[DOCKER] Building image neural-forge:latest (this can take a long time)...")
-            proc = subprocess.Popen(
+            self._proc = subprocess.Popen(
                 ["docker", "build", "-t", self.LOCAL_IMAGE, "."],
                 cwd=self.project_dir,
                 stdout=subprocess.PIPE,
@@ -176,12 +227,12 @@ class DockerBuildWorker(QObject):
                 encoding="utf-8",
                 errors="replace",
             )
-            _stream_process(proc, self.log)
-            success = proc.returncode == 0
+            _stream_process(self._proc, self.log)
+            success = self._proc.returncode == 0
             if success:
                 self.log.emit("[DOCKER] Build complete.")
             else:
-                self.log.emit(f"[DOCKER] Build failed (exit {proc.returncode}).")
+                self.log.emit(f"[DOCKER] Build failed (exit {self._proc.returncode}).")
             self.finished.emit(success)
 
         except FileNotFoundError:
@@ -215,6 +266,14 @@ class DockerRunWorker(QObject):
         self.image_path = image_path
         self.output_dir = output_dir
         self.settings   = settings
+        self._proc      = None
+
+    def cancel(self):
+        if self._proc:
+            try:
+                self._proc.terminate()
+            except Exception:
+                pass
 
     def run(self):
         try:
@@ -247,6 +306,8 @@ class DockerRunWorker(QObject):
                     "--mesh_faces",  str(s["faces"]),
                     "--mesh_stages", str(s["stages"]),
                 ]
+                if s.get("stages", 1) > 1:
+                    cmd.append("--mesh_intermediate")
                 if s.get("print_mode", False):
                     cmd.append("--mesh_print")
             else:
@@ -254,7 +315,7 @@ class DockerRunWorker(QObject):
 
             self.log.emit(f"[DOCKER] Running: {' '.join(cmd[:6])} ...")
 
-            proc = subprocess.Popen(
+            self._proc = subprocess.Popen(
                 cmd,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
@@ -263,7 +324,7 @@ class DockerRunWorker(QObject):
                 errors="replace",
             )
 
-            for line in iter(proc.stdout.readline, ""):
+            for line in iter(self._proc.stdout.readline, ""):
                 text = line.rstrip()
                 if not text:
                     continue
@@ -273,11 +334,11 @@ class DockerRunWorker(QObject):
                         self.step_done.emit(idx)
                         break
 
-            proc.stdout.close()
-            proc.wait()
-            success = proc.returncode == 0
+            self._proc.stdout.close()
+            self._proc.wait()
+            success = self._proc.returncode == 0
             if not success:
-                self.log.emit(f"[DOCKER] Container exited with code {proc.returncode}.")
+                self.log.emit(f"[DOCKER] Container exited with code {self._proc.returncode}.")
             self.finished.emit(success)
 
         except FileNotFoundError:

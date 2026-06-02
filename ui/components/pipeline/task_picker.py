@@ -1,16 +1,21 @@
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel,
-    QPushButton, QCheckBox, QDialog,
+    QPushButton, QCheckBox, QDialog, QFrame,
 )
-from PySide6.QtCore import Qt
+import qtawesome as qta
+
+from PySide6.QtCore import Qt, QSize
 
 from ui.styles.theme import (
     BG_ELEVATED, BG_SURFACE,
-    BORDER_BRIGHT,
+    BORDER_BRIGHT, BORDER,
     CYAN, CYAN_GLOW, CYAN_DIM,
+    NEON_ORANGE,
     TEXT_PRIMARY, TEXT_MUTED,
 )
 from ui.components.pipeline.constants import RESTORMER_TASKS
+
+_GRAY_TASKS = {"Gaussian_Gray_Denoising"}
 
 
 class TaskPickerDialog(QDialog):
@@ -27,35 +32,59 @@ class TaskPickerDialog(QDialog):
                 border-radius: 10px;
             }}
         """)
-        self.setFixedWidth(300)
+        self.setFixedWidth(380)
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(12, 12, 12, 12)
-        layout.setSpacing(6)
+        layout.setContentsMargins(14, 14, 14, 14)
+        layout.setSpacing(8)
 
         header = QLabel("RESTORMER TASKS")
         header.setStyleSheet(f"""
-            color: {TEXT_MUTED}; font-size: 10px;
+            color: {TEXT_MUTED}; font-size: 13px;
             font-family: 'JetBrains Mono', monospace;
             letter-spacing: 3px; font-weight: bold;
         """)
         layout.addWidget(header)
 
         self.checkboxes: dict = {}
+        _added_gray_divider = False
         for task in RESTORMER_TASKS:
+            if task in _GRAY_TASKS and not _added_gray_divider:
+                div = QFrame()
+                div.setFixedHeight(1)
+                div.setStyleSheet(f"background: {BORDER}; border: none;")
+                layout.addWidget(div)
+                note_row = QHBoxLayout()
+                note_row.setSpacing(6)
+                note_row.setContentsMargins(0, 0, 0, 0)
+                warn_icon_lbl = QLabel()
+                warn_icon_lbl.setPixmap(
+                    qta.icon("mdi.alert", color=NEON_ORANGE).pixmap(QSize(14, 14))
+                )
+                note_row.addWidget(warn_icon_lbl)
+                note_txt_lbl = QLabel("Grayscale output - runs first in chain")
+                note_txt_lbl.setStyleSheet(
+                    f"color: {NEON_ORANGE}; font-size: 12px; "
+                    f"font-family: 'JetBrains Mono', monospace; padding: 2px 0;"
+                )
+                note_row.addWidget(note_txt_lbl)
+                note_row.addStretch()
+                layout.addLayout(note_row)
+                _added_gray_divider = True
+
             cb = QCheckBox(task)
             cb.setChecked(task in selected)
             cb.setStyleSheet(f"""
                 QCheckBox {{
                     color: {TEXT_PRIMARY};
-                    font-size: 12px;
+                    font-size: 15px;
                     font-family: 'JetBrains Mono', monospace;
-                    padding: 4px 2px;
+                    padding: 5px 2px;
                 }}
                 QCheckBox::indicator {{
-                    width: 15px; height: 15px;
+                    width: 18px; height: 18px;
                     border: 1px solid {BORDER_BRIGHT};
-                    border-radius: 3px;
+                    border-radius: 4px;
                     background: {BG_SURFACE};
                 }}
                 QCheckBox::indicator:checked {{
@@ -68,14 +97,14 @@ class TaskPickerDialog(QDialog):
             self.checkboxes[task] = cb
 
         btn_ok = QPushButton("Confirm")
-        btn_ok.setFixedHeight(34)
+        btn_ok.setFixedHeight(42)
         btn_ok.setStyleSheet(f"""
             QPushButton {{
                 background: {CYAN_GLOW};
                 border: 1px solid {CYAN_DIM};
                 border-radius: 6px;
                 color: {CYAN};
-                font-size: 12px; font-weight: bold;
+                font-size: 15px; font-weight: bold;
                 margin-top: 4px;
             }}
             QPushButton:hover {{ background: {CYAN}33; }}
@@ -99,7 +128,7 @@ class TaskPickerButton(QWidget):
         layout.setSpacing(0)
 
         self.btn = QPushButton()
-        self.btn.setFixedHeight(36)
+        self.btn.setFixedHeight(42)
         self.btn.setCursor(Qt.PointingHandCursor)
         self.btn.setStyleSheet(f"""
             QPushButton {{
@@ -107,8 +136,8 @@ class TaskPickerButton(QWidget):
                 border: 1px solid {BORDER_BRIGHT};
                 border-radius: 6px;
                 color: {TEXT_PRIMARY};
-                padding: 6px 10px;
-                font-size: 12px;
+                padding: 8px 12px;
+                font-size: 15px;
                 font-family: 'JetBrains Mono', monospace;
                 text-align: left;
             }}

@@ -4,27 +4,37 @@ from datetime import datetime
 from google.cloud import storage
 
 
-GPU_COST_PER_HOUR = {
-    "L4": 0.84,
-    "T4": 0.59,
+# us-central1 on-demand pricing (VM + GPU accelerator)
+MACHINE_COST_PER_HOUR = {
+    "L4": 1.37,   # g2-standard-4 ($0.67) + NVIDIA L4 ($0.70)
+    "T4": 0.54,   # n1-standard-4 ($0.19) + NVIDIA T4 ($0.35)
 }
 
-ESTIMATED_DURATION_HOURS = {
-    "official": {
-        "refine_0": 0.75,
-        "refine_1": 1.0,
-        "refine_2": 1.5,
-        "refine_3": 2.0,
-    },
-    "float16": {
-        "refine_0": 0.40,
-        "refine_1": 0.60,
-        "refine_2": 0.90,
-        "refine_3": 1.20,
-    },
-}
+# Base pipeline runtime at crop=160, refine=0, official mode (minutes)
+_BASE_MINUTES = 3.0
+# Extra minutes per refine step (at base crop)
+_REFINE_MINUTES_PER_STEP = 1.0
+# Crop scaling exponent - tuned so crop=256 ≈ 2× the time of crop=160
+_CROP_EXPONENT = 1.7
+# float16 mode shaves ~15% off Wonder3D inference
+_FLOAT16_SPEEDUP = 0.85
+# Container startup overhead with PersistentResource (seconds -> minutes)
+_STARTUP_MINUTES = 1.0
 
 DEFAULT_MONTHLY_LIMIT_USD = 10.0
+
+
+def estimate_runtime_minutes(
+    refine: int,
+    crop: int = 160,
+    wonder3d_mode: str = "official",
+) -> float:
+    """Return estimated wall-clock minutes for the pipeline steps."""
+    crop_factor = (crop / 160) ** _CROP_EXPONENT
+    pipeline_minutes = (_BASE_MINUTES + refine * _REFINE_MINUTES_PER_STEP) * crop_factor
+    if wonder3d_mode == "float16":
+        pipeline_minutes *= _FLOAT16_SPEEDUP
+    return round(_STARTUP_MINUTES + pipeline_minutes, 2)
 
 
 class CloudBudgetManager:
@@ -108,14 +118,12 @@ class CloudBudgetManager:
         self,
         gpu_type: str,
         refine: int,
+        crop: int = 160,
         wonder3d_mode: str = "official",
     ) -> float:
-        hourly = GPU_COST_PER_HOUR.get(gpu_type, 0.84)
-        key = f"refine_{min(refine, 3)}"
-        duration = ESTIMATED_DURATION_HOURS.get(
-            wonder3d_mode, ESTIMATED_DURATION_HOURS["official"]
-        )[key]
-        return round(hourly * duration, 3)
+        hourly = MACHINE_COST_PER_HOUR.get(gpu_type, 1.37)
+        minutes = estimate_runtime_minutes(refine, crop, wonder3d_mode)
+        return round(hourly * (minutes / 60.0), 4)
 
     # -- Gate check ------------------------------------------------------------
 
@@ -124,12 +132,13 @@ class CloudBudgetManager:
         gpu_type: str,
         refine: int,
         wonder3d_mode: str = "official",
+        crop: int = 160,
     ) -> tuple[bool, float, float]:
         """
         Returns (allowed, estimated_cost, remaining_budget).
         Call this before launching any cloud job.
         """
-        cost = self.estimate_job_cost(gpu_type, refine, wonder3d_mode)
+        cost = self.estimate_job_cost(gpu_type, refine, crop, wonder3d_mode)
         rem = self.remaining()
         return rem >= cost, cost, rem
 
@@ -141,26 +150,30 @@ class CloudBudgetManager:
         refine: int,
         job_name: str,
         wonder3d_mode: str = "official",
+        crop: int = 160,
     ) -> float:
         """
         Write the job into GCS immediately after submission.
         Returns the estimated cost that was recorded.
         """
-        cost = self.estimate_job_cost(gpu_type, refine, wonder3d_mode)
+        cost = self.estimate_job_cost(gpu_type, refine, crop, wonder3d_mode)
+        est_min = estimate_runtime_minutes(refine, crop, wonder3d_mode)
         self._state.setdefault("jobs", []).append(
             {
-                "job_name": job_name,
-                "gpu_type": gpu_type,
-                "refine": refine,
-                "wonder3d_mode": wonder3d_mode,
+                "job_name":       job_name,
+                "gpu_type":       gpu_type,
+                "refine":         refine,
+                "crop":           crop,
+                "wonder3d_mode":  wonder3d_mode,
                 "estimated_cost": cost,
-                "timestamp": time.time(),
-                "datetime": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                "month": self._current_month_key(),
+                "estimated_min":  est_min,
+                "timestamp":      time.time(),
+                "datetime":       datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "month":          self._current_month_key(),
             }
         )
         self._save()
-        print(f"[BUDGET] Recorded ${cost:.3f} for job '{job_name}'")
+        print(f"[BUDGET] Recorded ${cost:.4f} (~{est_min:.1f} min) for job '{job_name}'")
         return cost
 
     # -- Summary for UI --------------------------------------------------------
@@ -168,14 +181,14 @@ class CloudBudgetManager:
     def summary(self) -> dict:
         jobs = self._jobs_this_month()
         return {
-            "user": self.user_email,
-            "month": self._current_month_key(),
+            "user":             self.user_email,
+            "month":            self._current_month_key(),
             "monthly_limit_usd": self.monthly_limit,
-            "spent_usd": self.spent_this_month(),
-            "remaining_usd": self.remaining(),
-            "usage_percent": self.usage_percent(),
-            "jobs_count": len(jobs),
-            "jobs": jobs,
+            "spent_usd":        self.spent_this_month(),
+            "remaining_usd":    self.remaining(),
+            "usage_percent":    self.usage_percent(),
+            "jobs_count":       len(jobs),
+            "jobs":             jobs,
         }
 
     def refresh(self):

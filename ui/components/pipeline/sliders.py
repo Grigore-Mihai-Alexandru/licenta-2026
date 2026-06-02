@@ -18,30 +18,31 @@ class LabeledSlider(QWidget):
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(4)
+        layout.setSpacing(6)
 
         top = QHBoxLayout()
         lbl = QLabel(label)
-        lbl.setStyleSheet(f"font-size: 11px; color: {TEXT_SECONDARY};")
+        lbl.setStyleSheet(f"font-size: 14px; color: {TEXT_SECONDARY};")
         top.addWidget(lbl)
         top.addStretch()
 
         self.spinbox = QSpinBox()
         self.spinbox.setRange(min_val, max_val)
         self.spinbox.setValue(default)
-        self.spinbox.setFixedWidth(72)
+        self.spinbox.setFixedWidth(90)
+        self.spinbox.setFixedHeight(32)
         self.spinbox.setAlignment(Qt.AlignRight)
         self.spinbox.setButtonSymbols(QSpinBox.NoButtons)
         self.spinbox.setStyleSheet(f"""
             QSpinBox {{
                 background: {BG_ELEVATED};
                 border: 1px solid {BORDER_BRIGHT};
-                border-radius: 4px;
+                border-radius: 5px;
                 color: {CYAN};
-                font-size: 11px;
+                font-size: 14px;
                 font-weight: bold;
                 font-family: 'JetBrains Mono', monospace;
-                padding: 1px 4px;
+                padding: 2px 6px;
             }}
             QSpinBox:focus {{ border-color: {CYAN}; }}
         """)
@@ -49,16 +50,17 @@ class LabeledSlider(QWidget):
         layout.addLayout(top)
 
         self.slider = QSlider(Qt.Horizontal)
+        self.slider.setFixedHeight(24)
         self.slider.setStyleSheet(f"""
             QSlider::groove:horizontal {{
-                background: {BORDER_BRIGHT}; height: 4px; border-radius: 2px;
+                background: {BORDER_BRIGHT}; height: 6px; border-radius: 3px;
             }}
             QSlider::handle:horizontal {{
-                background: {CYAN}; width: 14px; height: 14px;
-                margin: -5px 0; border-radius: 7px;
+                background: {CYAN}; width: 18px; height: 18px;
+                margin: -6px 0; border-radius: 9px;
             }}
             QSlider::sub-page:horizontal {{
-                background: {CYAN_DIM}; border-radius: 2px;
+                background: {CYAN_DIM}; border-radius: 3px;
             }}
         """)
 

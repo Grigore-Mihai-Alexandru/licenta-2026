@@ -7,7 +7,7 @@ def section_label(text: str) -> QLabel:
     lbl = QLabel(text)
     lbl.setStyleSheet(f"""
         color: {TEXT_MUTED};
-        font-size: 10px;
+        font-size: 12px;
         font-family: 'JetBrains Mono', monospace;
         letter-spacing: 3px;
         font-weight: bold;

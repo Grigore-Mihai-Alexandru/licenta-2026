@@ -32,14 +32,14 @@ class StepWidget(QWidget):
 
         self.name_lbl = QLabel(name)
         self.name_lbl.setStyleSheet(f"""
-            font-size: 13px; font-weight: bold;
+            font-size: 16px; font-weight: bold;
             font-family: 'JetBrains Mono', monospace;
             color: {TEXT_PRIMARY};
         """)
         text_col.addWidget(self.name_lbl)
 
         self.sub_lbl = QLabel(subtitle)
-        self.sub_lbl.setStyleSheet(f"font-size: 11px; color: {TEXT_MUTED};")
+        self.sub_lbl.setStyleSheet(f"font-size: 13px; color: {TEXT_MUTED};")
         text_col.addWidget(self.sub_lbl)
 
         layout.addLayout(text_col)
@@ -96,12 +96,12 @@ class StepWidget(QWidget):
             color: {badge_color}; background: {badge_color}22;
             border: 1px solid {badge_color}55;
             border-radius: 6px;
-            font-size: 10px; font-weight: bold;
-            letter-spacing: 1px; padding: 3px 6px;
+            font-size: 12px; font-weight: bold;
+            letter-spacing: 1px; padding: 3px 8px;
         """)
         name_color = TEXT_PRIMARY if s != IDLE else TEXT_SECONDARY
         self.name_lbl.setStyleSheet(f"""
-            font-size: 13px; font-weight: bold;
+            font-size: 16px; font-weight: bold;
             font-family: 'JetBrains Mono', monospace;
             color: {name_color};
         """)
