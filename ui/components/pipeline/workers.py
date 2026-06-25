@@ -1,6 +1,7 @@
 import os
 import sys
 import subprocess
+import time
 
 from PySide6.QtCore import QObject, Signal
 
@@ -123,7 +124,7 @@ class GCSDownloadWorker(QObject):
 
 
 class DriveWorker(QObject):
-    """Uploads result files to 'Neural Forge/<job_name>/' on Google Drive."""
+    """Uploads result files to 'Photo2Solid/<job_name>/' on Google Drive."""
     progress = Signal(str, int)
     finished = Signal(list)
     error    = Signal(str)
@@ -185,13 +186,13 @@ def _stream_process(proc, log_signal):
 
 class DockerBuildWorker(QObject):
     """
-    Builds the local Docker image `neural-forge:latest`.
+    Builds the local Docker image `photo2solid:latest`.
     Skips the build if the image already exists.
     """
     log      = Signal(str)
     finished = Signal(bool)   # success
 
-    LOCAL_IMAGE = "neural-forge:latest"
+    LOCAL_IMAGE = "photo2solid:latest"
 
     def __init__(self, project_dir: str):
         super().__init__()
@@ -213,11 +214,11 @@ class DockerBuildWorker(QObject):
                 capture_output=True,
             )
             if check.returncode == 0:
-                self.log.emit("[DOCKER] Image neural-forge:latest already exists - skipping build.")
+                self.log.emit(f"[DOCKER] Image {self.LOCAL_IMAGE} already exists - skipping build.")
                 self.finished.emit(True)
                 return
 
-            self.log.emit("[DOCKER] Building image neural-forge:latest (this can take a long time)...")
+            self.log.emit(f"[DOCKER] Building image {self.LOCAL_IMAGE} (this can take a long time)...")
             self._proc = subprocess.Popen(
                 ["docker", "build", "-t", self.LOCAL_IMAGE, "."],
                 cwd=self.project_dir,
@@ -245,30 +246,41 @@ class DockerBuildWorker(QObject):
 
 class DockerRunWorker(QObject):
     """
-    Runs the pipeline inside the `neural-forge:latest` container.
+    Runs the pipeline inside the `photo2solid:latest` container.
     Parses container stdout to emit step_done(index) as each step finishes.
     """
     log       = Signal(str)
     step_done = Signal(int)   # 0-based step index
     finished  = Signal(bool)  # success
 
-    LOCAL_IMAGE = "neural-forge:latest"
+    LOCAL_IMAGE = "photo2solid:latest"
 
-    # Markers from cloud_pipeline.py print statements
+    # Markers from cloud_pipeline.py print statements (index = step_widget index)
     _STEP_MARKERS = {
-        "[STEP 1]": 0,
-        "[STEP 2]": 1,
-        "[STEP 3]": 2,
+        "[STEP 0]": 0,   # ESRGAN
+        "[STEP 1]": 1,   # Restormer
+        "[STEP 2]": 2,   # Wonder3D
+        "[STEP 3]": 3,   # Mesh
     }
 
     def __init__(self, image_path: str, output_dir: str, settings: dict):
         super().__init__()
-        self.image_path = image_path
-        self.output_dir = output_dir
-        self.settings   = settings
-        self._proc      = None
+        self.image_path      = image_path
+        self.output_dir      = output_dir
+        self.settings        = settings
+        self._proc           = None
+        self._container_name = f"photo2solid-{int(time.time())}"
 
     def cancel(self):
+        # Kill the container via Docker Engine so it actually stops, not just the CLI process.
+        if self._container_name:
+            try:
+                subprocess.run(
+                    ["docker", "kill", self._container_name],
+                    capture_output=True,
+                )
+            except Exception:
+                pass
         if self._proc:
             try:
                 self._proc.terminate()
@@ -287,11 +299,22 @@ class DockerRunWorker(QObject):
             input_mount  = input_dir.replace("\\", "/")
             output_mount = self.output_dir.replace("\\", "/")
 
+            # Mount the two pipeline scripts from the local project so that
+            # any fix to cloud_pipeline.py or upscale_esrgan.py takes effect
+            # immediately without rebuilding the Docker image.
+            _project = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
+            _pipeline_script = os.path.join(_project, "cloud", "cloud_pipeline.py").replace("\\", "/")
+            _upscale_script  = os.path.join(_project, "assets", "upscale_esrgan.py").replace("\\", "/")
+
             s = self.settings
             cmd = [
                 "docker", "run", "--rm", "--gpus", "all",
+                "--name", self._container_name,
+                "-e", "PYTHONUNBUFFERED=1",
                 "-v", f"{input_mount}:/app/temp_input",
                 "-v", f"{output_mount}:/app/outputs",
+                "-v", f"{_pipeline_script}:/app/cloud_pipeline.py:ro",
+                "-v", f"{_upscale_script}:/app/upscale_esrgan.py:ro",
                 self.LOCAL_IMAGE,
                 "--input_image",     f"/app/temp_input/{image_filename}",
                 "--output_dir",      "/app/outputs",
@@ -301,6 +324,9 @@ class DockerRunWorker(QObject):
                 "--refine",          str(s["refine"]),
             ]
 
+            if s.get("upscale"):
+                cmd.append("--upscale")
+
             if s.get("mesh_optimize", True):
                 cmd += [
                     "--mesh_faces",  str(s["faces"]),
@@ -308,8 +334,15 @@ class DockerRunWorker(QObject):
                 ]
                 if s.get("stages", 1) > 1:
                     cmd.append("--mesh_intermediate")
+                if s.get("lod_watertight", False):
+                    cmd.append("--mesh_lod_watertight")
                 if s.get("print_mode", False):
-                    cmd.append("--mesh_print")
+                    cmd += [
+                        "--mesh_print",
+                        "--mesh_size",          str(s.get("print_size", 100)),
+                        "--mesh_filament_cost", str(s.get("print_filament_cost", 65)),
+                        "--mesh_infill",        str(s.get("print_infill", 20) / 100.0),
+                    ]
             else:
                 cmd.append("--skip_mesh")
 
@@ -329,8 +362,9 @@ class DockerRunWorker(QObject):
                 if not text:
                     continue
                 self.log.emit(text)
+                lower = text.lower()
                 for marker, idx in self._STEP_MARKERS.items():
-                    if marker in text and "done" in text.lower():
+                    if marker in text and ("done" in lower or "skip" in lower):
                         self.step_done.emit(idx)
                         break
 
@@ -357,7 +391,7 @@ class CloudDockerWorker(QObject):
     log      = Signal(str)
     finished = Signal(bool)
 
-    LOCAL_IMAGE = "neural-forge:latest"
+    LOCAL_IMAGE = "photo2solid:latest"
 
     def __init__(self, project_dir: str, image_uri: str, region: str):
         super().__init__()
@@ -386,7 +420,7 @@ class CloudDockerWorker(QObject):
                 capture_output=True,
             )
             if check.returncode != 0:
-                self.log.emit("[CLOUD BUILD] Building neural-forge:latest (takes a long time)...")
+                self.log.emit(f"[CLOUD BUILD] Building {self.LOCAL_IMAGE} (takes a long time)...")
                 if not self._run_cmd(["docker", "build", "-t", self.LOCAL_IMAGE, "."]):
                     self.log.emit("[CLOUD BUILD] Docker build failed.")
                     self.finished.emit(False)

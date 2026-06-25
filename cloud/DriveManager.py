@@ -7,7 +7,7 @@ from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaFileUpload, MediaIoBaseDownload
 
-FOLDER_NAME = "Neural Forge"
+FOLDER_NAME = "Photo2Solid"
 DRIVE_SCOPE = "https://www.googleapis.com/auth/drive.file"
 
 
@@ -50,7 +50,7 @@ class DriveManager:
         return self._folder_id
 
     def get_or_create_job_folder(self, job_name: str) -> str:
-        """Get or create 'Neural Forge/<job_name>/' and return its Drive folder id."""
+        """Get or create 'Photo2Solid/<job_name>/' and return its Drive folder id."""
         parent_id = self.get_or_create_folder()
 
         query = (
@@ -144,7 +144,7 @@ class DriveManager:
 
     def upload_results_for_job(self, file_paths: list[str], job_name: str,
                                progress_callback=None) -> list[dict]:
-        """Upload all result files into 'Neural Forge/<job_name>/' preserving subdirectory structure."""
+        """Upload all result files into 'Photo2Solid/<job_name>/' preserving subdirectory structure."""
         job_folder_id = self.get_or_create_job_folder(job_name)
 
         valid_paths = [p for p in file_paths if p and os.path.exists(p)]

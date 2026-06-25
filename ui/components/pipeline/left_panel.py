@@ -64,8 +64,9 @@ from ui.components.pipeline.task_picker import TaskPickerButton
 
 
 class LeftPanel(QWidget):
-    image_loaded  = Signal(str)
-    run_requested = Signal()
+    image_loaded    = Signal(str)
+    run_requested   = Signal()
+    settings_changed = Signal()   # emitted when any cost-relevant setting changes
 
     def __init__(self, run_mode: str = "local", parent=None):
         super().__init__(parent)
@@ -84,14 +85,19 @@ class LeftPanel(QWidget):
         _GRAY = {"Gaussian_Gray_Denoising"}
         tasks = [t for t in tasks if t in _GRAY] + [t for t in tasks if t not in _GRAY]
         return {
-            "restormer_tasks": ",".join(tasks),
-            "wonder3d_mode":   "float16" if self.combo_wonder3d.currentIndex() == 1 else "official",
-            "crop":            self.slider_crop.value(),
-            "refine":          self.slider_refine.value(),
-            "mesh_optimize":   self.check_mesh_opt.isChecked(),
-            "faces":           self.slider_faces.value(),
-            "stages":          self.slider_stages.value(),
-            "print_mode":      self.check_print.isChecked(),
+            "upscale":             self.check_upscale.isChecked(),
+            "restormer_tasks":     ",".join(tasks),
+            "wonder3d_mode":       "float16" if self.combo_wonder3d.currentIndex() == 1 else "official",
+            "crop":                self.slider_crop.value(),
+            "refine":              self.slider_refine.value(),
+            "mesh_optimize":       self.check_mesh_opt.isChecked(),
+            "faces":               self.slider_faces.value(),
+            "stages":              self.slider_stages.value(),
+            "lod_watertight":      self.check_lod_watertight.isChecked(),
+            "print_mode":          self.check_print.isChecked(),
+            "print_size":          self.slider_print_size.value(),
+            "print_filament_cost": self.slider_filament_cost.value(),
+            "print_infill":        self.slider_infill.value(),
         }
 
     def set_controls_enabled(self, enabled: bool):
@@ -115,6 +121,26 @@ class LeftPanel(QWidget):
             QProgressBar::chunk {{ background: {color}; border-radius: 4px; }}
         """)
         self._budget_widget.setVisible(True)
+
+    def set_estimate(self, cost_usd: float, est_min: float, affordable: bool):
+        if not hasattr(self, "_estimate_lbl"):
+            return
+        if cost_usd <= 0:
+            self._estimate_lbl.setVisible(False)
+            return
+        if affordable:
+            color = CYAN
+            suffix = ""
+        else:
+            color = NEON_ORANGE
+            suffix = "  ⚠ over budget"
+        self._estimate_lbl.setText(
+            f"Est. job:  ${cost_usd:.4f}  (~{est_min:.0f} min){suffix}"
+        )
+        self._estimate_lbl.setStyleSheet(
+            f"color: {color}; font-size: 12px; letter-spacing: 0.5px;"
+        )
+        self._estimate_lbl.setVisible(True)
 
     def _checkbox_style(self) -> str:
         return f"""
@@ -163,6 +189,72 @@ class LeftPanel(QWidget):
                 border-radius: 8px;
             """)
         self.image_loaded.emit(path)
+        self._analyze_and_suggest(path)
+
+    def _analyze_and_suggest(self, path: str):
+        """
+        Analyzes image resolution and sharpness, then auto-suggests and
+        auto-checks the Real-ESRGAN upscale option accordingly.
+        Uses PIL when available; falls back to QPixmap for resolution only.
+        """
+        try:
+            from PIL import Image, ImageFilter, ImageStat
+
+            img      = Image.open(path)
+            w, h     = img.size
+            max_dim  = max(w, h)
+
+            gray      = img.convert("L")
+            edges     = gray.filter(ImageFilter.FIND_EDGES)
+            sharpness = ImageStat.Stat(edges).var[0]
+
+            if max_dim < 400:
+                suggest = True
+                msg     = f"Recommended  -  {w}x{h} px is too small for quality reconstruction."
+                color   = NEON_ORANGE
+            elif max_dim < 800 and sharpness < 300:
+                suggest = True
+                msg     = f"Recommended  -  low resolution and detail ({w}x{h} px, sharpness {sharpness:.0f})."
+                color   = NEON_ORANGE
+            elif sharpness < 120:
+                suggest = True
+                msg     = f"Consider upscaling  -  image appears blurry or low detail ({w}x{h} px)."
+                color   = CYAN
+            elif max_dim >= 1024:
+                suggest = False
+                msg     = f"Not needed  -  resolution is already high ({w}x{h} px)."
+                color   = TEXT_MUTED
+            else:
+                suggest = False
+                msg     = f"Optional  -  quality looks adequate ({w}x{h} px, sharpness {sharpness:.0f})."
+                color   = TEXT_MUTED
+
+        except ImportError:
+            # PIL not installed — use QPixmap for resolution-only check
+            px      = QPixmap(path)
+            w, h    = px.width(), px.height()
+            max_dim = max(w, h)
+            if max_dim < 512:
+                suggest = True
+                msg     = f"Recommended  -  image is only {w}x{h} px."
+                color   = NEON_ORANGE
+            else:
+                suggest = False
+                msg     = f"Optional  -  image size looks adequate ({w}x{h} px)."
+                color   = TEXT_MUTED
+
+        except Exception:
+            self._upscale_suggestion.setText("Could not analyze image quality.")
+            self._upscale_suggestion.setStyleSheet(
+                f"color: {TEXT_MUTED}; font-size: 11px; padding-left: 26px;"
+            )
+            return
+
+        self.check_upscale.setChecked(suggest)
+        self._upscale_suggestion.setText(msg)
+        self._upscale_suggestion.setStyleSheet(
+            f"color: {color}; font-size: 11px; padding-left: 26px;"
+        )
 
     def _build(self):
         # Outer layout: scroll area on top, run button pinned at bottom
@@ -243,6 +335,23 @@ class LeftPanel(QWidget):
         slay.setContentsMargins(18, 18, 18, 18)
         slay.setSpacing(16)
 
+        self.check_upscale = QCheckBox("Upscale input (Real-ESRGAN x4)")
+        self.check_upscale.setChecked(False)
+        self.check_upscale.setStyleSheet(self._checkbox_style())
+        slay.addWidget(self.check_upscale)
+
+        self._upscale_suggestion = QLabel("Load an image to see quality analysis.")
+        self._upscale_suggestion.setWordWrap(True)
+        self._upscale_suggestion.setStyleSheet(
+            f"color: {TEXT_MUTED}; font-size: 11px; padding-left: 26px;"
+        )
+        slay.addWidget(self._upscale_suggestion)
+
+        div0 = QFrame()
+        div0.setFixedHeight(1)
+        div0.setStyleSheet(f"background: {BORDER}; border: none;")
+        slay.addWidget(div0)
+
         task_lbl = QLabel("Restormer Tasks")
         task_lbl.setStyleSheet(f"font-size: 15px; color: {TEXT_SECONDARY};")
         slay.addWidget(task_lbl)
@@ -269,9 +378,9 @@ class LeftPanel(QWidget):
         div.setStyleSheet(f"background: {BORDER}; border: none;")
         slay.addWidget(div)
 
-        crop_snaps = [96, 128, 160, 192, 224, 256, 320, 384, 512]
-        self.slider_crop   = LabeledSlider("Crop Size",    96,   512,  160, snap_values=crop_snaps)
-        self.slider_refine = LabeledSlider("Refine Steps",  0,    10,    0, step=1)
+        crop_snaps = [96, 128, 160, 192, 224, 256]
+        self.slider_crop   = LabeledSlider("Crop Size",    96,   256,  160, snap_values=crop_snaps)
+        self.slider_refine = LabeledSlider("Refine Steps",  0,    3,    0, step=1)
 
         slay.addWidget(self.slider_crop)
         slay.addWidget(self.slider_refine)
@@ -280,6 +389,12 @@ class LeftPanel(QWidget):
         div2.setFixedHeight(1)
         div2.setStyleSheet(f"background: {BORDER}; border: none;")
         slay.addWidget(div2)
+
+        # Notify pipeline_screen whenever cost-relevant params change
+        self.slider_crop.slider.valueChanged.connect(self.settings_changed)
+        self.slider_refine.slider.valueChanged.connect(self.settings_changed)
+        self.combo_wonder3d.currentIndexChanged.connect(self.settings_changed)
+        self.check_upscale.stateChanged.connect(self.settings_changed)
 
         self.check_mesh_opt = QCheckBox("Optimize Mesh (LOD generation)")
         self.check_mesh_opt.setChecked(True)
@@ -296,12 +411,33 @@ class LeftPanel(QWidget):
         mog.addWidget(self.slider_faces)
         mog.addWidget(self.slider_stages)
 
+        self.check_lod_watertight = QCheckBox("Repair holes (watertight LODs)")
+        self.check_lod_watertight.setChecked(False)
+        self.check_lod_watertight.setStyleSheet(self._checkbox_style())
+        mog.addWidget(self.check_lod_watertight)
+
         slay.addWidget(self.mesh_opt_group)
         self.check_mesh_opt.toggled.connect(self.mesh_opt_group.setVisible)
 
         self.check_print = QCheckBox("3D Print mode  (watertight + STL export)")
         self.check_print.setStyleSheet(self._checkbox_style())
         slay.addWidget(self.check_print)
+
+        self.print_group = QWidget()
+        pog = QVBoxLayout(self.print_group)
+        pog.setContentsMargins(0, 0, 0, 0)
+        pog.setSpacing(12)
+
+        self.slider_print_size    = LabeledSlider("Model size (mm)",        10, 300, 100, step=10)
+        self.slider_filament_cost = LabeledSlider("Filament cost (RON/kg)",  5, 200,  65, step=5)
+        self.slider_infill        = LabeledSlider("Infill density (%)",       5,  60,  20, step=5)
+        pog.addWidget(self.slider_print_size)
+        pog.addWidget(self.slider_filament_cost)
+        pog.addWidget(self.slider_infill)
+
+        slay.addWidget(self.print_group)
+        self.print_group.setVisible(False)
+        self.check_print.toggled.connect(self.print_group.setVisible)
 
         col.addWidget(settings_card)
         col.addStretch()
@@ -349,6 +485,13 @@ class LeftPanel(QWidget):
                 QProgressBar::chunk {{ background: {NEON_GREEN}; border-radius: 4px; }}
             """)
             blay.addWidget(self._budget_bar)
+
+            self._estimate_lbl = QLabel("")
+            self._estimate_lbl.setStyleSheet(
+                f"color: {CYAN}; font-size: 12px; letter-spacing: 0.5px;"
+            )
+            self._estimate_lbl.setVisible(False)
+            blay.addWidget(self._estimate_lbl)
 
             self._budget_widget.setVisible(False)
             outer.addWidget(self._budget_widget)

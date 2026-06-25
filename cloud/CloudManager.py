@@ -370,9 +370,15 @@ class CloudManager:
         mesh_stages: int = 1,
         mesh_intermediate: bool = False,
         mesh_optimize: bool = True,
+        mesh_print: bool = False,
+        mesh_lod_watertight: bool = False,
+        mesh_size: float = 100.0,
+        mesh_filament_cost: float = 65.0,
+        mesh_infill: float = 0.20,
         gpu_type: str = "L4",
         wonder3d_mode: str = "official",
         restormer_tasks: str = "Real_Denoising",
+        upscale: bool = False,
         budget_manager: CloudBudgetManager = None,
     ):
         gpu_configs = {
@@ -384,7 +390,8 @@ class CloudManager:
 
         if budget_manager is not None:
             allowed, cost, remaining = budget_manager.can_submit(
-                gpu_type, refine, wonder3d_mode, crop=crop_size
+                gpu_type, refine, wonder3d_mode, crop=crop_size,
+                upscale=upscale, restormer=bool(restormer_tasks),
             )
             if not allowed:
                 summary = budget_manager.summary()
@@ -394,7 +401,7 @@ class CloudManager:
                     f"(resets on the 1st of next month)"
                 )
             from CloudBudgetManager import estimate_runtime_minutes
-            est_min = estimate_runtime_minutes(refine, crop_size, wonder3d_mode)
+            est_min = estimate_runtime_minutes(refine, crop_size, wonder3d_mode, upscale=upscale, restormer=bool(restormer_tasks))
             print(
                 f"[BUDGET] Estimated cost: ${cost:.4f} (~{est_min:.1f} min) | "
                 f"Remaining after job: ${remaining - cost:.4f}"
@@ -415,10 +422,21 @@ class CloudManager:
             "--wonder3d_mode",   wonder3d_mode,
             "--restormer_tasks", restormer_tasks,
         ]
+        if upscale:
+            args.append("--upscale")
         if mesh_intermediate:
             args.append("--mesh_intermediate")
+        if mesh_lod_watertight:
+            args.append("--mesh_lod_watertight")
         if not mesh_optimize:
             args.append("--skip_mesh")
+        if mesh_print:
+            args += [
+                "--mesh_print",
+                "--mesh_size",          str(mesh_size),
+                "--mesh_filament_cost", str(mesh_filament_cost),
+                "--mesh_infill",        str(mesh_infill),
+            ]
 
         job_spec = {
             "workerPoolSpecs": [{
@@ -462,10 +480,27 @@ class CloudManager:
 
         if budget_manager is not None:
             job_name = job.resource_name.split("/")[-1]
-            cost     = budget_manager.record_job(gpu_type, refine, job_name, wonder3d_mode, crop=crop_size)
+            cost     = budget_manager.record_job(gpu_type, refine, job_name, wonder3d_mode, crop=crop_size, upscale=upscale, restormer_tasks=len(restormer_tasks.split(",")) if restormer_tasks else 0)
             print(f"[BUDGET] Recorded ${cost:.4f} for job {job_name}")
 
         return job
+
+    def get_pipeline_progress(self) -> int:
+        """
+        Read the latest completed step index from the GCS progress file.
+        Returns -1 if the job has not started writing progress yet.
+        Never raises — polling failures are silently ignored.
+        """
+        try:
+            import json
+            from google.cloud import storage
+            client = storage.Client(credentials=self.creds, project=self.project_id)
+            blob   = client.bucket(self.bucket_name).blob(
+                f"outputs/{self._user_prefix}/progress.json"
+            )
+            return int(json.loads(blob.download_as_text()).get("step", -1))
+        except Exception:
+            return -1
 
     # -- Artifact registry -----------------------------------------------------
 

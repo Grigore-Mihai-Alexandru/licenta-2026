@@ -201,7 +201,7 @@ class WelcomeScreen(QWidget):
         header.addWidget(badge, alignment=Qt.AlignCenter)
         header.addSpacing(20)
 
-        title = QLabel("NEURAL FORGE")
+        title = QLabel("PHOTO2SOLID")
         title.setAlignment(Qt.AlignCenter)
         title.setFont(QFont("Orbitron", 48, QFont.Black))
         title.setStyleSheet(f"color: {TEXT_PRIMARY}; letter-spacing: 6px;")
@@ -212,7 +212,7 @@ class WelcomeScreen(QWidget):
         title.setGraphicsEffect(sh)
         header.addWidget(title)
 
-        subtitle = QLabel("Restormer  -  Wonder3D  -  Mesh Optimizer")
+        subtitle = QLabel("Real-ESRGAN  -  Restormer  -  Wonder3DPlus  -  Mesh Optimizer")
         subtitle.setAlignment(Qt.AlignCenter)
         subtitle.setFont(QFont("JetBrains Mono", 17))
         subtitle.setStyleSheet(f"color: {TEXT_SECONDARY}; letter-spacing: 2px;")

@@ -8,7 +8,7 @@ from ui.styles.theme import (
     NEON_GREEN, NEON_ORANGE,
     TEXT_PRIMARY, TEXT_SECONDARY, TEXT_MUTED,
 )
-from ui.components.pipeline.constants import IDLE, RUNNING, DONE, ERROR
+from ui.components.pipeline.constants import IDLE, RUNNING, DONE, ERROR, SKIP
 
 
 class StepWidget(QWidget):
@@ -56,6 +56,9 @@ class StepWidget(QWidget):
         self._state = state
         self._refresh()
 
+    def set_subtitle(self, text: str):
+        self.sub_lbl.setText(text)
+
     def _refresh(self):
         s = self._state
         if s == IDLE:
@@ -76,6 +79,12 @@ class StepWidget(QWidget):
             badge_text   = "DONE"
             badge_color  = NEON_GREEN
             circle_txt   = "OK"
+        elif s == SKIP:
+            circle_bg    = BG_ELEVATED
+            circle_color = BORDER_BRIGHT
+            badge_text   = "SKIP"
+            badge_color  = TEXT_MUTED
+            circle_txt   = "-"
         else:
             circle_bg    = f"{NEON_ORANGE}22"
             circle_color = NEON_ORANGE
@@ -99,7 +108,12 @@ class StepWidget(QWidget):
             font-size: 12px; font-weight: bold;
             letter-spacing: 1px; padding: 3px 8px;
         """)
-        name_color = TEXT_PRIMARY if s != IDLE else TEXT_SECONDARY
+        if s == SKIP:
+            name_color = TEXT_MUTED
+        elif s == IDLE:
+            name_color = TEXT_SECONDARY
+        else:
+            name_color = TEXT_PRIMARY
         self.name_lbl.setStyleSheet(f"""
             font-size: 16px; font-weight: bold;
             font-family: 'JetBrains Mono', monospace;

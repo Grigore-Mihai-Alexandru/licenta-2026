@@ -13,7 +13,7 @@ from ui.styles.theme import (
     NEON_GREEN, NEON_ORANGE, PURPLE,
     TEXT_MUTED, TEXT_SECONDARY, TEXT_PRIMARY,
 )
-from ui.components.pipeline.constants import IDLE
+from ui.components.pipeline.constants import IDLE, RUNNING, DONE, ERROR, SKIP
 from ui.components.pipeline.helpers import section_label, card
 from ui.components.pipeline.step_widget import StepWidget, StepConnector
 
@@ -39,6 +39,44 @@ class CenterPanel(QWidget):
     def set_all_steps(self, state: str):
         for sw in self.step_widgets:
             sw.set_state(state)
+
+    def configure_for_run(self, upscale: bool):
+        """
+        Called just before the pipeline starts.
+        Sets ESRGAN to IDLE (will run) or SKIP (not selected), all others to IDLE.
+        """
+        if upscale:
+            self.step_widgets[0].set_state(IDLE)
+            self.step_widgets[0].set_subtitle("4x upscaling")
+        else:
+            self.step_widgets[0].set_state(SKIP)
+            self.step_widgets[0].set_subtitle("optional - not selected")
+        for i in range(1, len(self.step_widgets)):
+            self.step_widgets[i].set_state(IDLE)
+
+    def advance_step(self, done_idx: int):
+        """
+        Mark done_idx as DONE and set the next IDLE step to RUNNING.
+        Connected to DockerRunWorker.step_done for precise per-step transitions.
+        """
+        if 0 <= done_idx < len(self.step_widgets):
+            self.step_widgets[done_idx].set_state(DONE)
+        next_idx = done_idx + 1
+        if next_idx < len(self.step_widgets):
+            if self.step_widgets[next_idx]._state not in (DONE, ERROR, SKIP):
+                self.step_widgets[next_idx].set_state(RUNNING)
+
+    def set_all_active_steps(self, state: str):
+        """Apply state to every step that is not SKIP."""
+        for sw in self.step_widgets:
+            if sw._state != SKIP:
+                sw.set_state(state)
+
+    def mark_failed(self):
+        """Set ERROR on RUNNING and IDLE steps; leave DONE and SKIP untouched."""
+        for sw in self.step_widgets:
+            if sw._state not in (DONE, SKIP):
+                sw.set_state(ERROR)
 
     def log(self, message: str, color: str = None):
         safe = _html.escape(message)
@@ -119,14 +157,15 @@ class CenterPanel(QWidget):
         steps_layout.setSpacing(0)
 
         for i, (num, name, sub, letter) in enumerate([
-            (1, "RESTORMER", "Image denoising",     "R"),
-            (2, "WONDER3D",  "3D model generation", "W"),
-            (3, "MESH OPT",  "LOD generation",      "M"),
+            (0, "ESRGAN",    "4x upscaling",         "E"),
+            (1, "RESTORMER", "Image denoising",       "R"),
+            (2, "WONDER3D",  "3D model generation",   "W"),
+            (3, "MESH OPT",  "LOD generation",        "M"),
         ]):
             sw = StepWidget(num, name, sub, letter)
             self.step_widgets.append(sw)
             steps_layout.addWidget(sw)
-            if i < 2:
+            if i < 3:
                 steps_layout.addWidget(StepConnector())
 
         col.addWidget(steps_card)

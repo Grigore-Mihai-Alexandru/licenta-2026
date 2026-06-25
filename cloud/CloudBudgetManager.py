@@ -10,16 +10,16 @@ MACHINE_COST_PER_HOUR = {
     "T4": 0.54,   # n1-standard-4 ($0.19) + NVIDIA T4 ($0.35)
 }
 
-# Base pipeline runtime at crop=160, refine=0, official mode (minutes)
-_BASE_MINUTES = 3.0
-# Extra minutes per refine step (at base crop)
-_REFINE_MINUTES_PER_STEP = 1.0
-# Crop scaling exponent - tuned so crop=256 ≈ 2× the time of crop=160
-_CROP_EXPONENT = 1.7
-# float16 mode shaves ~15% off Wonder3D inference
-_FLOAT16_SPEEDUP = 0.85
-# Container startup overhead with PersistentResource (seconds -> minutes)
-_STARTUP_MINUTES = 1.0
+_STARTUP_MINUTES      = 1.0   # container init with PersistentResource (~15s actual, 1 min buffer)
+_ESRGAN_MINUTES       = 0.5   # Real-ESRGAN upscaling (~30s)
+_RESTORMER_PER_TASK   = 0.2   # per Restormer task (~12s each)
+_W3D_BASE             = 3.0   # Wonder3D at crop=160, refine=0
+_W3D_REFINE_STEP      = 1.5   # per refinement step (~90s each)
+_W3D_CROP_EXP         = 0.15  # crop has minimal runtime impact (empirically calibrated)
+_FLOAT16_SPEEDUP      = 0.62  # float16 is ~38% faster on Wonder3D inference
+_MESH_MINUTES         = 0.5   # mesh optimization + optional print STL
+
+_SERVICE_MARKUP       = 0.15  # 15% safety margin
 
 DEFAULT_MONTHLY_LIMIT_USD = 10.0
 
@@ -28,13 +28,20 @@ def estimate_runtime_minutes(
     refine: int,
     crop: int = 160,
     wonder3d_mode: str = "official",
+    upscale: bool = False,
+    restormer_tasks: int = 0,
 ) -> float:
-    """Return estimated wall-clock minutes for the pipeline steps."""
-    crop_factor = (crop / 160) ** _CROP_EXPONENT
-    pipeline_minutes = (_BASE_MINUTES + refine * _REFINE_MINUTES_PER_STEP) * crop_factor
+    """Return estimated wall-clock minutes for the full pipeline."""
+    crop_factor = (crop / 160) ** _W3D_CROP_EXP
+    w3d = (_W3D_BASE + refine * _W3D_REFINE_STEP) * crop_factor
     if wonder3d_mode == "float16":
-        pipeline_minutes *= _FLOAT16_SPEEDUP
-    return round(_STARTUP_MINUTES + pipeline_minutes, 2)
+        w3d *= _FLOAT16_SPEEDUP
+    pipeline = w3d + _MESH_MINUTES
+    if upscale:
+        pipeline += _ESRGAN_MINUTES
+    if restormer_tasks:
+        pipeline += restormer_tasks * _RESTORMER_PER_TASK
+    return round(_STARTUP_MINUTES + pipeline, 2)
 
 
 class CloudBudgetManager:
@@ -120,10 +127,13 @@ class CloudBudgetManager:
         refine: int,
         crop: int = 160,
         wonder3d_mode: str = "official",
+        upscale: bool = False,
+        restormer_tasks: int = 0,
     ) -> float:
         hourly = MACHINE_COST_PER_HOUR.get(gpu_type, 1.37)
-        minutes = estimate_runtime_minutes(refine, crop, wonder3d_mode)
-        return round(hourly * (minutes / 60.0), 4)
+        minutes = estimate_runtime_minutes(refine, crop, wonder3d_mode, upscale, restormer_tasks)
+        raw = hourly * (minutes / 60.0)
+        return round(raw * (1 + _SERVICE_MARKUP), 4)
 
     # -- Gate check ------------------------------------------------------------
 
@@ -133,12 +143,14 @@ class CloudBudgetManager:
         refine: int,
         wonder3d_mode: str = "official",
         crop: int = 160,
+        upscale: bool = False,
+        restormer_tasks: int = 0,
     ) -> tuple[bool, float, float]:
         """
         Returns (allowed, estimated_cost, remaining_budget).
         Call this before launching any cloud job.
         """
-        cost = self.estimate_job_cost(gpu_type, refine, crop, wonder3d_mode)
+        cost = self.estimate_job_cost(gpu_type, refine, crop, wonder3d_mode, upscale, restormer_tasks)
         rem = self.remaining()
         return rem >= cost, cost, rem
 
@@ -151,13 +163,15 @@ class CloudBudgetManager:
         job_name: str,
         wonder3d_mode: str = "official",
         crop: int = 160,
+        upscale: bool = False,
+        restormer_tasks: int = 0,
     ) -> float:
         """
         Write the job into GCS immediately after submission.
         Returns the estimated cost that was recorded.
         """
-        cost = self.estimate_job_cost(gpu_type, refine, crop, wonder3d_mode)
-        est_min = estimate_runtime_minutes(refine, crop, wonder3d_mode)
+        cost = self.estimate_job_cost(gpu_type, refine, crop, wonder3d_mode, upscale, restormer_tasks)
+        est_min = estimate_runtime_minutes(refine, crop, wonder3d_mode, upscale, restormer_tasks)
         self._state.setdefault("jobs", []).append(
             {
                 "job_name":       job_name,

@@ -102,7 +102,7 @@ class TopBar(QWidget):
         sep.setStyleSheet(f"color: {BORDER}; font-size: 16px;")
         layout.addWidget(sep)
 
-        logo = QLabel("⬡ NEURAL FORGE")
+        logo = QLabel("⬡ PHOTO2SOLID")
         logo.setStyleSheet(f"""
             color: {CYAN}; font-size: 14px; font-weight: bold;
             font-family: 'JetBrains Mono', monospace; letter-spacing: 2px;

@@ -1,6 +1,6 @@
 import subprocess
 import os
-import sys
+import re
 import glob
 import shutil
 import argparse
@@ -8,14 +8,22 @@ from google.cloud import storage
 
 
 def run_step(command, cwd=None):
-    print(f"\n>>> {' '.join(command)}")
-    result = subprocess.run(command, cwd=cwd, capture_output=True, text=True)
-    if result.stdout:
-        print(result.stdout)
-    if result.stderr:
-        print(result.stderr, file=sys.stderr)
-    if result.returncode != 0:
-        raise RuntimeError(f"Step failed (exit {result.returncode}): {' '.join(command)}")
+    print(f"\n>>> {' '.join(command)}", flush=True)
+    proc = subprocess.Popen(
+        command,
+        cwd=cwd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    for line in iter(proc.stdout.readline, ""):
+        print(line, end="", flush=True)
+    proc.stdout.close()
+    proc.wait()
+    if proc.returncode != 0:
+        raise RuntimeError(f"Step failed (exit {proc.returncode}): {' '.join(command)}")
 
 
 def parse_gcs_path(gcs_path: str) -> tuple[str, str]:
@@ -104,15 +112,50 @@ if __name__ == "__main__":
                         help="Scale mesh to this max dimension in mm (requires --mesh_print)")
     parser.add_argument("--mesh_infill",        type=float, default=0.20,
                         help="Infill ratio 0.0-1.0 for print cost estimate")
-    parser.add_argument("--mesh_filament_cost", type=float, default=25.0,
-                        help="Filament cost in EUR/kg for print cost estimate")
+    parser.add_argument("--mesh_filament_cost",   type=float, default=65.0,
+                        help="Filament cost in RON/kg for print cost estimate")
+    parser.add_argument("--mesh_lod_watertight",  action="store_true",
+                        help="Repair mesh holes before each LOD decimation stage")
     parser.add_argument("--skip_mesh", action="store_true",
                         help="Skip mesh optimization step entirely")
+    parser.add_argument("--upscale", action="store_true",
+                        help="Upscale input image with Real-ESRGAN x4 before Restormer")
 
     args = parser.parse_args()
 
     is_cloud_input  = args.input_image.startswith("gs://")
     is_cloud_output = args.output_dir.startswith("gs://")
+
+    # GCS progress tracking: write a small JSON after each step so the UI
+    # can poll it and update the step panel in real time.
+    _prog_client = None
+    _prog_bucket = None
+    _prog_blob   = None
+
+    if is_cloud_output:
+        _pb, _pp   = parse_gcs_path(args.output_dir)
+        _prog_client = storage.Client()
+        _prog_bucket = _pb
+        _prog_blob   = f"{_pp}/progress.json"
+        try:
+            import json as _j
+            _prog_client.bucket(_prog_bucket).blob(_prog_blob).upload_from_string(
+                _j.dumps({"step": -1}), content_type="application/json"
+            )
+        except Exception:
+            pass
+
+    def write_progress(step: int, name: str):
+        if not _prog_client:
+            return
+        try:
+            import json as _j
+            _prog_client.bucket(_prog_bucket).blob(_prog_blob).upload_from_string(
+                _j.dumps({"step": step, "name": name}),
+                content_type="application/json",
+            )
+        except Exception:
+            pass
 
     WONDER3D_SCRIPTS = {
         "float16":  "/app/Wonder3D/run_colab_float16.py",
@@ -139,6 +182,21 @@ if __name__ == "__main__":
 
     name_no_ext = os.path.splitext(os.path.basename(current_working_image))[0]
 
+    # -- 1. REAL-ESRGAN UPSCALING (optional) -----------------------------------
+
+    if args.upscale:
+        esrgan_out = os.path.join(local_input_dir, f"{name_no_ext}_esrgan.png")
+        run_step([
+            "/opt/venv_restormer/bin/python", "/app/upscale_esrgan.py",
+            "--input",  current_working_image,
+            "--output", esrgan_out,
+            "--scale",  "4",
+        ])
+        current_working_image = esrgan_out
+        name_no_ext = os.path.splitext(os.path.basename(esrgan_out))[0]
+        print(f"[STEP 0] Real-ESRGAN done -> {current_working_image}")
+        write_progress(0, "ESRGAN")
+
     # -- 2. RESTORMER ----------------------------------------------------------
 
     tasks = [t.strip() for t in args.restormer_tasks.split(",") if t.strip()]
@@ -161,6 +219,7 @@ if __name__ == "__main__":
             raise RuntimeError(f"Restormer output not found in {result_dir}")
 
     print(f"[STEP 1] Restormer done -> {current_working_image}")
+    write_progress(1, "Restormer")
 
     # -- 3. WONDER3D -----------------------------------------------------------
 
@@ -175,12 +234,14 @@ if __name__ == "__main__":
     ], cwd="/app/Wonder3D")
 
     print(f"[STEP 2] Wonder3D done -> {wonder3d_out_dir}")
+    write_progress(2, "Wonder3D")
 
     # -- 4. MESH OPTIMIZATION --------------------------------------------------
 
     final_obj = find_output_obj(wonder3d_out_dir, name_no_ext)
     if args.skip_mesh:
         print("[STEP 3] Mesh optimization skipped.")
+        write_progress(3, "Mesh")
     elif final_obj:
         base_name   = os.path.splitext(final_obj)[0]
         lowpoly_obj = base_name + "_lowpoly.obj"
@@ -200,13 +261,17 @@ if __name__ == "__main__":
         ]
         if args.mesh_intermediate:
             mesh_cmd.append("--intermediate")
+        if args.mesh_lod_watertight:
+            mesh_cmd.append("--lod-watertight")
         if args.mesh_print:
             mesh_cmd.append("--print")
 
         run_step(mesh_cmd, cwd="/app/utils")
         print(f"[STEP 3] Mesh optimization done -> {lowpoly_obj}")
+        write_progress(3, "Mesh")
     else:
         print("[STEP 3] Skipped - no mesh found.")
+        write_progress(3, "Mesh")
 
     # -- 5. OUTPUT -------------------------------------------------------------
 

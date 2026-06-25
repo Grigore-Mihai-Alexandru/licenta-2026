@@ -32,13 +32,14 @@ def _make_tray_icon() -> QIcon:
 class AppWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Neural Forge - AI 3D Pipeline")
+        self.setWindowTitle("Photo2Solid")
         self.resize(1600, 900)
         self.setMinimumSize(1100, 700)
 
         self.run_mode    = None
         self.credentials = None
         self.user_info   = {}
+        self._docker_check_active = False   # re-entry guard for blocking Docker check
 
         # Persistent pipeline screens - keep alive when user goes home
         self._pipeline_screens: dict[str, PipelineScreen] = {}
@@ -67,10 +68,10 @@ class AppWindow(QMainWindow):
     def _setup_tray(self):
         self._tray = QSystemTrayIcon(self)
         self._tray.setIcon(_make_tray_icon())
-        self._tray.setToolTip("Neural Forge")
+        self._tray.setToolTip("Photo2Solid")
 
         tray_menu = QMenu()
-        act_show = tray_menu.addAction("Show Neural Forge")
+        act_show = tray_menu.addAction("Show Photo2Solid")
         act_show.triggered.connect(self._bring_to_front)
         tray_menu.addSeparator()
         act_quit = tray_menu.addAction("Quit")
@@ -103,13 +104,20 @@ class AppWindow(QMainWindow):
         self.stack.setCurrentWidget(self.login)
 
     def _on_local(self):
+        # Prevent re-entry while check_docker_running() is blocking the event loop
+        if self._docker_check_active:
+            return
+        self._docker_check_active = True
+
         from PySide6.QtCore import QSettings
         from ui.components.DockerWarningDialog import (
             DockerWarningDialog, DockerStartDialog, check_docker_running, find_docker_desktop,
         )
 
-        # 1. Check if Docker is reachable
-        docker_ok = check_docker_running()
+        try:
+            docker_ok = check_docker_running()
+        finally:
+            self._docker_check_active = False
 
         if not docker_ok:
             # Determine whether Docker is missing entirely or just not started
@@ -122,7 +130,7 @@ class AppWindow(QMainWindow):
                 return
 
         # 2. Show one-time prerequisites checklist (has "don't show again")
-        settings = QSettings("NeuralForge", "App")
+        settings = QSettings("Photo2Solid", "App")
         if not DockerWarningDialog.run_if_needed(settings, self):
             return
 
@@ -197,5 +205,5 @@ if __name__ == "__main__":
     _load_fonts()
 
     win = AppWindow()
-    win.show()
+    win.showMaximized()
     sys.exit(app.exec())

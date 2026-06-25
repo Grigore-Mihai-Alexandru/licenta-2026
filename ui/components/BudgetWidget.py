@@ -111,7 +111,7 @@ class BudgetWidget(QWidget):
         self._btn_refresh.setEnabled(False)
         self._btn_refresh.setText("...")
 
-        self._thread = QThread()
+        self._thread = QThread(self)
         self._worker = BudgetRefreshWorker(self._manager)
         self._worker.moveToThread(self._thread)
 
@@ -120,6 +120,8 @@ class BudgetWidget(QWidget):
         self._worker.error.connect(self._on_refresh_error)
         self._worker.finished.connect(self._thread.quit)
         self._worker.error.connect(self._thread.quit)
+        self._thread.finished.connect(self._thread.deleteLater)
+        self._thread.finished.connect(self._worker.deleteLater)
 
         self._thread.start()
 

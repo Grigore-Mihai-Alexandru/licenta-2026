@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Neural Forge — 3D Viewer</title>
+    <title>Pic2Solid — 3D Viewer</title>
     <style>
         *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -81,6 +81,59 @@
             font-size: 11px;
             letter-spacing: 2px;
         }
+
+        /* -- Triangle counter -- */
+        #tri-count {
+            display: none;
+            position: absolute;
+            bottom: 12px; right: 12px;
+            background: #121220CC;
+            border: 1px solid #2E2E52;
+            border-radius: 6px;
+            padding: 6px 12px;
+            text-align: right;
+            z-index: 10;
+            pointer-events: none;
+        }
+        #tri-count .tri-num {
+            color: #E8A020;
+            font-family: 'Consolas', monospace;
+            font-size: 13px;
+            letter-spacing: 1px;
+        }
+        #tri-count .tri-label {
+            color: #7878A8;
+            font-family: 'Consolas', monospace;
+            font-size: 9px;
+            letter-spacing: 2px;
+            margin-top: 2px;
+        }
+
+        /* -- View-mode buttons (bottom-left, Blender-style) -- */
+        #view-modes {
+            position: absolute;
+            bottom: 12px; left: 12px;
+            display: flex;
+            gap: 4px;
+            z-index: 10;
+        }
+        .vm-btn {
+            width: 32px; height: 32px;
+            background: #121220CC;
+            border: 1px solid #2E2E52;
+            border-radius: 6px;
+            color: #7878A8;
+            font-size: 16px;
+            line-height: 1;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 0;
+            transition: border-color 0.15s, color 0.15s, background 0.15s;
+        }
+        .vm-btn:hover  { border-color: #B07818; color: #E8A020; background: #E8A02015; }
+        .vm-btn.active { border-color: #E8A020; color: #E8A020; background: #E8A02015; }
     </style>
 
     <script type="importmap">
@@ -89,6 +142,8 @@
             "three":                                      "./assets/js/three.module.js",
             "three/addons/loaders/GLTFLoader.js":         "./assets/js/GLTFLoader.js",
             "three/addons/loaders/OBJLoader.js":          "./assets/js/OBJLoader.js",
+            "three/addons/loaders/STLLoader.js":          "./assets/js/STLLoader.js",
+            "three/addons/loaders/MTLLoader.js":          "./assets/js/MTLLoader.js",
             "three/addons/controls/OrbitControls.js":     "./assets/js/OrbitControls.js",
             "three/addons/utils/BufferGeometryUtils.js":  "./assets/js/BufferGeometryUtils.js"
         }
@@ -103,12 +158,25 @@
         <div class="main">3D Viewer</div>
         <div class="sub">No model loaded</div>
     </div>
+    <!-- View-mode buttons: Wireframe / Solid / Material Preview / Rendered -->
+    <div id="view-modes">
+        <button type="button" class="vm-btn" id="vm-wireframe" title="Wireframe">○</button>
+        <button type="button" class="vm-btn active" id="vm-solid" title="Solid">●</button>
+        <button type="button" class="vm-btn" id="vm-material" title="Material Preview">◑</button>
+        <button type="button" class="vm-btn" id="vm-rendered" title="Rendered">◎</button>
+    </div>
     <div id="loader">LOADING...</div>
+    <div id="tri-count">
+        <div class="tri-num" id="tri-num">0</div>
+        <div class="tri-label">TRIANGLES</div>
+    </div>
 
     <script type="module">
         import * as THREE        from 'three';
         import { GLTFLoader }    from 'three/addons/loaders/GLTFLoader.js';
         import { OBJLoader }     from 'three/addons/loaders/OBJLoader.js';
+        import { STLLoader }     from 'three/addons/loaders/STLLoader.js';
+        import { MTLLoader }     from 'three/addons/loaders/MTLLoader.js';
         import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 
         // -- Renderer / Scene / Camera -------------------------------------
@@ -130,20 +198,116 @@
         controls.enableDamping = true;
         controls.dampingFactor = 0.06;
 
-        // Lighting
-        scene.add(new THREE.AmbientLight(0xffffff, 0.7));
-        const key = new THREE.DirectionalLight(0xffffff, 1.1);
-        key.position.set(5, 10, 5);
-        scene.add(key);
-        const fill = new THREE.DirectionalLight(0xE8A020, 0.3);
-        fill.position.set(-5, 3, -5);
-        scene.add(fill);
+        // Lighting — stored so view-mode switching can adjust intensity
+        const ambientLight = new THREE.AmbientLight(0xffffff, 0.7);
+        scene.add(ambientLight);
+        const keyLight = new THREE.DirectionalLight(0xffffff, 1.1);
+        keyLight.position.set(5, 10, 5);
+        scene.add(keyLight);
+        const fillLight = new THREE.DirectionalLight(0xE8A020, 0.3);
+        fillLight.position.set(-5, 3, -5);
+        scene.add(fillLight);
 
         // Grid
         const grid = new THREE.GridHelper(20, 40, 0x1E1E38, 0x1E1E38);
         grid.material.opacity = 0.4;
         grid.material.transparent = true;
         scene.add(grid);
+
+        // -- View modes ----------------------------------------------------
+
+        let viewMode = 'solid';
+
+        const SOLID_MAT = () => new THREE.MeshStandardMaterial(
+            { color: 0xCCCCCC, roughness: 0.7, metalness: 0.1 }
+        );
+
+        function applyViewMode() {
+            Object.values(models).forEach(m => {
+                m.object3D.traverse(child => {
+                    if (!child.isMesh) return;
+                    switch (viewMode) {
+                        case 'wireframe':
+                            if (!child.userData.wireMat) {
+                                child.userData.wireMat = new THREE.MeshBasicMaterial(
+                                    { color: 0xE8A020, wireframe: true }
+                                );
+                            }
+                            child.material = child.userData.wireMat;
+                            break;
+                        case 'solid':
+                            child.material = child.userData.solidMat || SOLID_MAT();
+                            break;
+                        case 'material':
+                        case 'rendered': {
+                            const orig = child.userData.originalMat;
+                            child.material = orig || child.userData.solidMat;
+                            break;
+                        }
+                    }
+                });
+            });
+
+            // Lighting & tone-mapping per mode
+            switch (viewMode) {
+                case 'wireframe':
+                    renderer.toneMapping         = THREE.NoToneMapping;
+                    ambientLight.intensity       = 0.0;
+                    keyLight.intensity           = 0.0;
+                    fillLight.intensity          = 0.0;
+                    break;
+                case 'solid':
+                    renderer.toneMapping         = THREE.NoToneMapping;
+                    ambientLight.intensity       = 0.7;
+                    keyLight.intensity           = 1.1;
+                    fillLight.intensity          = 0.3;
+                    break;
+                case 'material':
+                    renderer.toneMapping         = THREE.NoToneMapping;
+                    ambientLight.intensity       = 1.0;
+                    keyLight.intensity           = 1.3;
+                    fillLight.intensity          = 0.4;
+                    break;
+                case 'rendered':
+                    renderer.toneMapping         = THREE.ACESFilmicToneMapping;
+                    renderer.toneMappingExposure = 1.2;
+                    ambientLight.intensity       = 0.15;
+                    keyLight.intensity           = 2.2;
+                    fillLight.intensity          = 0.9;
+                    break;
+            }
+        }
+
+        function setViewMode(mode) {
+            viewMode = mode;
+            document.querySelectorAll('.vm-btn').forEach(b => b.classList.remove('active'));
+            document.getElementById('vm-' + mode).classList.add('active');
+            applyViewMode();
+        }
+
+        // -- Triangle counting ---------------------------------------------
+
+        function countTriangles(object3D) {
+            let n = 0;
+            object3D.traverse(child => {
+                if (!child.isMesh || !child.geometry) return;
+                const geo = child.geometry;
+                n += geo.index
+                    ? geo.index.count / 3
+                    : geo.attributes.position.count / 3;
+            });
+            return Math.round(n);
+        }
+
+        function updateTriCount() {
+            const el  = document.getElementById('tri-count');
+            const num = document.getElementById('tri-num');
+            const visible = Object.values(models).filter(m => m.visible);
+            if (visible.length === 0) { el.style.display = 'none'; return; }
+            const total = visible.reduce((s, m) => s + countTriangles(m.object3D), 0);
+            num.textContent   = total.toLocaleString();
+            el.style.display  = 'block';
+        }
 
         // -- Model registry ------------------------------------------------
         // { key: { label, object3D, visible } }
@@ -184,6 +348,7 @@
             const overlay = document.getElementById('overlay');
             sidebar.innerHTML = '';
             overlay.innerHTML = '';
+            updateTriCount();
 
             const keys = Object.keys(models);
             document.getElementById('empty').style.display =
@@ -215,17 +380,16 @@
         }
 
         function registerModel(key, label, object3D) {
-            // Give meshes without material a default
             object3D.traverse(child => {
-                if (child.isMesh && !child.material) {
-                    child.material = new THREE.MeshStandardMaterial(
-                        { color: 0xCCCCCC, roughness: 0.7, metalness: 0.1 }
-                    );
-                }
-                if (child.isMesh) {
-                    child.castShadow    = true;
-                    child.receiveShadow = true;
-                }
+                if (!child.isMesh) return;
+                // Ensure a material exists before we stash it
+                if (!child.material) child.material = SOLID_MAT();
+                // Store original (textured) material for Material/Rendered modes
+                child.userData.originalMat = child.material;
+                // Dedicated solid-grey material for Solid mode
+                child.userData.solidMat    = SOLID_MAT();
+                child.castShadow    = true;
+                child.receiveShadow = true;
             });
 
             // Hide other models when a new one arrives
@@ -239,6 +403,7 @@
 
             fitCamera(object3D);
             document.getElementById('loader').style.display = 'none';
+            applyViewMode();
             refreshUI();
         }
 
@@ -259,12 +424,51 @@
 
         function loadOBJ(key, url, label) {
             document.getElementById('loader').style.display = 'block';
-            new OBJLoader().load(
+            const basePath = url.slice(0, url.lastIndexOf('/') + 1);
+            // PyMeshLab appends .mtl to the full filename: model_lowpoly.obj → model_lowpoly.obj.mtl
+            // Fall back to the stripped form (model_lowpoly.mtl) for other exporters
+            const mtlUrl   = url + '.mtl';
+
+            function doLoadOBJ(materials) {
+                const loader = new OBJLoader();
+                if (materials) { materials.preload(); loader.setMaterials(materials); }
+                loader.load(
+                    url,
+                    obj => registerModel(key, label, obj),
+                    undefined,
+                    err => {
+                        console.error('OBJ load error:', err);
+                        document.getElementById('loader').style.display = 'none';
+                    }
+                );
+            }
+
+            // Try to load companion .mtl; fall back gracefully if absent
+            new MTLLoader()
+                .setPath(basePath)
+                .load(mtlUrl, doLoadOBJ, undefined, () => doLoadOBJ(null));
+        }
+
+        function loadSTL(key, url, label) {
+            document.getElementById('loader').style.display = 'block';
+            new STLLoader().load(
                 url,
-                obj  => registerModel(key, label, obj),
+                geo => {
+                    geo.computeVertexNormals();
+                    const mat  = new THREE.MeshStandardMaterial(
+                        { color: 0xCCCCCC, roughness: 0.55, metalness: 0.05,
+                          vertexColors: geo.hasColors || false }
+                    );
+                    const mesh = new THREE.Mesh( geo, mat );
+                    mesh.castShadow    = true;
+                    mesh.receiveShadow = true;
+                    const group = new THREE.Group();
+                    group.add( mesh );
+                    registerModel( key, label, group );
+                },
                 undefined,
-                err  => {
-                    console.error('OBJ load error:', err);
+                err => {
+                    console.error('STL load error:', err);
                     document.getElementById('loader').style.display = 'none';
                 }
             );
@@ -278,6 +482,7 @@
             const ext = url.split('.').pop().toLowerCase();
             if      (ext === 'glb' || ext === 'gltf') loadGLB(url, url, label);
             else if (ext === 'obj')                    loadOBJ(url, url, label);
+            else if (ext === 'stl')                    loadSTL(url, url, label);
         };
 
         window.loadModel = function(url, label) {
@@ -306,6 +511,12 @@
         });
 
         refreshUI();
+
+        // View-mode button wiring
+        document.getElementById('vm-wireframe').onclick = () => setViewMode('wireframe');
+        document.getElementById('vm-solid'    ).onclick = () => setViewMode('solid');
+        document.getElementById('vm-material' ).onclick = () => setViewMode('material');
+        document.getElementById('vm-rendered' ).onclick = () => setViewMode('rendered');
     </script>
 </body>
 </html>

@@ -1,5 +1,5 @@
 from ui.components.pipeline.constants import (
-    IDLE, RUNNING, DONE, ERROR,
+    IDLE, RUNNING, DONE, ERROR, SKIP,
     VERTEX_DONE_STATES, RESTORMER_TASKS, COMBO_STYLE,
 )
 from ui.components.pipeline.workers import (

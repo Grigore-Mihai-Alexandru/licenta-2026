@@ -1,5 +1,6 @@
-"""JobHistoryPanel - shows past pipeline jobs from ~/Downloads/NeuralForge/"""
+"""JobHistoryPanel - shows past pipeline jobs from ~/Downloads/Photo2Solid/"""
 
+import json
 import os
 from datetime import datetime
 
@@ -20,43 +21,68 @@ from ui.styles.theme import (
 )
 
 _RESULT_EXTS = {".glb", ".obj", ".stl", ".json"}
-_HISTORY_DIR = os.path.join(os.path.expanduser("~"), "Downloads", "NeuralForge")
+_HISTORY_DIR = os.path.join(os.path.expanduser("~"), "Downloads", "Photo2Solid")
 
 
-def _parse_job_date(folder_name: str) -> str:
-    """Extract human-readable date from job folder name like 'image_2026-05-01_143022'."""
+def _parse_job_timestamp(folder_name: str) -> datetime | None:
+    """Parse the datetime embedded in a job folder name, e.g. 'cat_2026-06-08_161400'."""
     parts = folder_name.rsplit("_", 2)
     if len(parts) >= 3:
         try:
-            dt = datetime.strptime(f"{parts[-2]}_{parts[-1]}", "%Y-%m-%d_%H%M%S")
-            return dt.strftime("%d %b %Y  %H:%M")
+            return datetime.strptime(f"{parts[-2]}_{parts[-1]}", "%Y-%m-%d_%H%M%S")
         except ValueError:
             pass
+    # Fallback: use filesystem mtime so folders without timestamps still sort correctly
+    return None
+
+
+def _parse_job_date(folder_name: str) -> str:
+    """Return a human-readable date string from the folder timestamp."""
+    dt = _parse_job_timestamp(folder_name)
+    if dt:
+        return dt.strftime("%d %b %Y  %H:%M")
     return ""
 
 
 def _scan_jobs() -> list[dict]:
-    """Return list of {name, path, date_str, file_count, file_paths} dicts, newest first."""
+    """Return list of job dicts, newest first by folder timestamp."""
     jobs = []
     if not os.path.isdir(_HISTORY_DIR):
         return jobs
 
-    for name in sorted(os.listdir(_HISTORY_DIR), reverse=True):
+    for name in os.listdir(_HISTORY_DIR):
         path = os.path.join(_HISTORY_DIR, name)
         if not os.path.isdir(path):
             continue
         file_paths = []
+        print_cost = None
         for root, _, files in os.walk(path):
             for f in files:
-                if os.path.splitext(f)[1].lower() in _RESULT_EXTS:
+                ext = os.path.splitext(f)[1].lower()
+                if ext in _RESULT_EXTS:
                     file_paths.append(os.path.join(root, f))
+                if print_cost is None and f.endswith("_mesh_report.json"):
+                    try:
+                        with open(os.path.join(root, f)) as fh:
+                            print_cost = json.load(fh).get("print_cost")
+                    except Exception:
+                        pass
+
+        ts = _parse_job_timestamp(name)
+        # Fallback to folder mtime for non-standard names
+        sort_key = ts if ts is not None else datetime.fromtimestamp(os.path.getmtime(path))
+
         jobs.append({
-            "name":       name,
-            "path":       path,
-            "date_str":   _parse_job_date(name),
-            "file_count": len(file_paths),
-            "file_paths": file_paths,
+            "name":        name,
+            "path":        path,
+            "date_str":    _parse_job_date(name),
+            "file_count":  len(file_paths),
+            "file_paths":  file_paths,
+            "print_cost":  print_cost,
+            "_sort_key":   sort_key,
         })
+
+    jobs.sort(key=lambda j: j["_sort_key"], reverse=True)
     return jobs
 
 
@@ -74,8 +100,8 @@ class _JobCard(QFrame):
         """)
 
         row = QHBoxLayout(self)
-        row.setContentsMargins(14, 12, 14, 12)
-        row.setSpacing(12)
+        row.setContentsMargins(16, 14, 16, 14)
+        row.setSpacing(16)
 
         # Left: job info
         info_col = QVBoxLayout()
@@ -90,6 +116,8 @@ class _JobCard(QFrame):
         name_lbl = QLabel(display_name)
         name_lbl.setFont(QFont("JetBrains Mono", 15, QFont.Bold))
         name_lbl.setStyleSheet(f"color: {TEXT_PRIMARY}; background: transparent; border: none;")
+        name_lbl.setMaximumWidth(310)
+        name_lbl.setWordWrap(False)
         info_col.addWidget(name_lbl)
 
         if job["date_str"]:
@@ -107,14 +135,34 @@ class _JobCard(QFrame):
             border: 1px solid {color}55; border-radius: 8px;
             padding: 2px 8px; font-size: 15px;
         """)
-        info_col.addWidget(badge, alignment=Qt.AlignLeft)
+
+        # Print cost badge (only shown when print mode was used)
+        pc = job.get("print_cost")
+        if pc:
+            cost   = pc.get("estimated_cost_eur", pc.get("estimated_cost_ron", 0))
+            weight = pc.get("estimated_weight_g", 0)
+            badges_row = QHBoxLayout()
+            badges_row.setSpacing(6)
+            badges_row.setContentsMargins(0, 0, 0, 0)
+            badges_row.addWidget(badge)
+            cost_badge = QLabel(f"◆ {cost:.2f} RON \xb7 {weight}g")
+            cost_badge.setStyleSheet(f"""
+                color: {CYAN}; background: {CYAN}18;
+                border: 1px solid {CYAN}55; border-radius: 8px;
+                padding: 2px 8px; font-size: 15px;
+            """)
+            badges_row.addWidget(cost_badge)
+            badges_row.addStretch()
+            info_col.addLayout(badges_row)
+        else:
+            info_col.addWidget(badge, alignment=Qt.AlignLeft)
 
         row.addLayout(info_col, 1)
 
         # Right: Load button (only if files exist)
         if job["file_paths"]:
             btn = QPushButton("Load")
-            btn.setFixedSize(96, 32)
+            btn.setFixedSize(80, 34)
             btn.setCursor(Qt.PointingHandCursor)
             btn.setStyleSheet(f"""
                 QPushButton {{
@@ -161,14 +209,20 @@ class JobHistoryPanel(QDialog):
         self.setWindowFlags(Qt.Dialog | Qt.FramelessWindowHint)
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.setModal(False)
-        self.setFixedWidth(420)
+        self.setFixedWidth(520)
         self._build()
 
-        # Position: right edge of parent, full height
+        # Position: right edge of parent, full height, clamped to screen
         if parent:
-            pg = parent.geometry()
+            pg     = parent.geometry()
+            screen = self.screen().availableGeometry() if self.screen() else None
             self.setFixedHeight(pg.height() - 60)
-            self.move(pg.right() - self.width() - 8, pg.top() + 55)
+            x = pg.right() - self.width() - 8
+            y = pg.top() + 55
+            if screen:
+                x = max(screen.left(), min(x, screen.right() - self.width()))
+                y = max(screen.top(),  min(y, screen.bottom() - self.height()))
+            self.move(x, y)
 
     def _build(self):
         outer = QVBoxLayout(self)
@@ -216,7 +270,7 @@ class JobHistoryPanel(QDialog):
         header_row.addWidget(btn_close)
         vlay.addLayout(header_row)
 
-        hint = QLabel(f"Jobs saved to  ~/Downloads/NeuralForge/")
+        hint = QLabel(f"Jobs saved to  ~/Downloads/Photo2Solid/")
         hint.setStyleSheet(f"color: {TEXT_MUTED}; font-size: 15px;")
         vlay.addWidget(hint)
 

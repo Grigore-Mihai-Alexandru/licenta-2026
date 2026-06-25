@@ -108,17 +108,31 @@ class LoginScreen(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self._thread = None
-        self._worker = None
+        self._thread       = None
+        self._worker       = None
         self._auto_triggered = False
+        self._auto_timer   = None   # cancellable QTimer (replaces bare singleShot)
+        self._dot_timer    = None
         self._build()
 
     def showEvent(self, event):
         super().showEvent(event)
-        # If a saved token exists, skip the button and authenticate silently.
         if os.path.exists(_TOKEN_PATH) and not self._auto_triggered:
             self._auto_triggered = True
-            QTimer.singleShot(120, self._on_login)
+            self._auto_timer = QTimer(self)
+            self._auto_timer.setSingleShot(True)
+            self._auto_timer.timeout.connect(self._on_login)
+            self._auto_timer.start(120)
+
+    def hideEvent(self, event):
+        super().hideEvent(event)
+        # Cancel any pending auto-trigger so the next visit starts clean
+        if self._auto_timer is not None:
+            self._auto_timer.stop()
+            self._auto_timer = None
+        self._auto_triggered = False
+        # Clear stale status text so the next visit doesn't show old messages
+        self.status_lbl.setText("")
 
     def _build(self):
         root = QVBoxLayout(self)
@@ -269,15 +283,28 @@ class LoginScreen(QWidget):
         root.addWidget(footer)
 
     def _on_back(self):
+        # Cancel the auto-login timer if it hasn't fired yet
+        if self._auto_timer is not None:
+            self._auto_timer.stop()
+            self._auto_timer = None
         self._auto_triggered = False
+        # Stop dot animation if running
+        if self._dot_timer is not None:
+            self._dot_timer.stop()
         self.back_requested.emit()
 
     def _on_login(self):
+        # Guard: ignore if screen is no longer visible (stale timer/signal)
+        if not self.isVisible():
+            return
+        # Guard: don't start a second auth thread while one is running
+        if self._thread is not None and self._thread.isRunning():
+            return
+
         self.btn_google.setEnabled(False)
         self._set_status("Opening browser for authentication...", TEXT_SECONDARY)
 
-        # Run auth in background thread - browser will open automatically
-        self._thread = QThread()
+        self._thread = QThread(self)
         self._worker = AuthWorker()
         self._worker.moveToThread(self._thread)
 
@@ -286,11 +313,14 @@ class LoginScreen(QWidget):
         self._worker.error.connect(self._on_auth_error)
         self._worker.success.connect(self._thread.quit)
         self._worker.error.connect(self._thread.quit)
+        self._thread.finished.connect(self._thread.deleteLater)
+        self._thread.finished.connect(self._worker.deleteLater)
 
         self._thread.start()
 
-        # Animate status dots while waiting
         self._dot_tick = 0
+        if self._dot_timer is not None:
+            self._dot_timer.stop()
         self._dot_timer = QTimer(self)
         self._dot_timer.timeout.connect(self._animate_status)
         self._dot_timer.start(500)
@@ -301,13 +331,20 @@ class LoginScreen(QWidget):
         self._set_status(f"Waiting for browser authentication{dots}", TEXT_SECONDARY)
 
     def _on_auth_success(self, manager):
-        self._dot_timer.stop()
+        if self._dot_timer is not None:
+            self._dot_timer.stop()
+        # Guard: user navigated away while auth was running — discard silently
+        if not self.isVisible():
+            return
         self.btn_google.setEnabled(True)
         self._set_status("Authenticated successfully!", NEON_GREEN)
-        QTimer.singleShot(800, lambda: self.login_success.emit(manager))
+        QTimer.singleShot(800, lambda: self.login_success.emit(manager) if self.isVisible() else None)
 
     def _on_auth_error(self, message: str):
-        self._dot_timer.stop()
+        if self._dot_timer is not None:
+            self._dot_timer.stop()
+        if not self.isVisible():
+            return
         self.btn_google.setEnabled(True)
         self._set_status(message, NEON_ORANGE)
 

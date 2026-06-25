@@ -8,6 +8,7 @@ IDLE    = "idle"
 RUNNING = "running"
 DONE    = "done"
 ERROR   = "error"
+SKIP    = "skip"
 
 VERTEX_DONE_STATES = {
     "JOB_STATE_SUCCEEDED", "JOB_STATE_FAILED",

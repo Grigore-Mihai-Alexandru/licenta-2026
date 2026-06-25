@@ -80,7 +80,7 @@ def save_mesh(ms: ml.MeshSet, path: str, export_stl: bool = False) -> tuple:
     obj_path = base + ".obj"
     stl_path = base + ".stl" if export_stl else None
 
-    ms.save_current_mesh(obj_path, save_textures=False)
+    ms.save_current_mesh(obj_path, save_textures=True)
 
     glb_path = None
     if HAS_TRIMESH:
@@ -237,9 +237,10 @@ def optimize_mesh(
     save_intermediate: bool = False,
     report_path: str = None,
     print_mode: bool = False,
+    lod_watertight: bool = False,
     target_size_mm: float = None,
     infill: float = 0.20,
-    filament_cost: float = 25.0,
+    filament_cost: float = 65.0,
     log_metrics: bool = False,
 ) -> dict:
     if not os.path.exists(input_file):
@@ -275,6 +276,9 @@ def optimize_mesh(
         is_last   = stage_num == len(stage_targets)
 
         ms = load_mesh(input_file)
+
+        if lod_watertight:
+            check_and_repair_watertight(ms)
 
         print(f"[LOD {stage_num}/{stages}] {initial_faces:,} -> {target:,}...")
         t0      = time.perf_counter()
@@ -374,6 +378,8 @@ if __name__ == "__main__":
     parser.add_argument("--report",        type=str, default=None)
     parser.add_argument("--print",         dest="print_mode", action="store_true",
                         help="also export watertight STL from original high-poly")
+    parser.add_argument("--lod-watertight", dest="lod_watertight", action="store_true",
+                        help="repair holes in each LOD before decimation")
     parser.add_argument("--size",          type=float, default=50.0, # 5cm default max size for print
                         help="scale STL to this max dimension in mm")
     parser.add_argument("--infill",        type=float, default=0.20)
@@ -390,6 +396,7 @@ if __name__ == "__main__":
             save_intermediate=args.intermediate,
             report_path=args.report,
             print_mode=args.print_mode,
+            lod_watertight=args.lod_watertight,
             target_size_mm=args.size,
             infill=args.infill,
             filament_cost=args.filament_cost,

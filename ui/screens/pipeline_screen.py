@@ -15,8 +15,57 @@ from ui.components.pipeline import (
     TopBar, LeftPanel, CenterPanel, RightPanel,
 )
 
-_VIEWER_EXTS = {".glb", ".obj"}
+_VIEWER_EXTS = {".glb", ".obj", ".stl"}
 _RESULT_EXTS = {".glb", ".obj", ".stl", ".json"}
+
+
+_CLOUD_COST_PER_HOUR = {"L4": 1.37, "T4": 0.54}
+_W3D_BASE            = 3.0
+_W3D_REFINE_STEP     = 1.5
+_W3D_CROP_EXP        = 0.15
+_FLOAT16_SPEEDUP     = 0.62
+_STARTUP_MIN         = 1.0
+_ESRGAN_MIN          = 0.5
+_RESTORMER_PER_TASK  = 0.2
+_MESH_MIN            = 0.5
+_SERVICE_MARKUP      = 0.15
+
+
+def _cloud_estimate(gpu_type: str, refine: int, crop: int,
+                    wonder3d_mode: str, upscale: bool = False,
+                    restormer_tasks: int = 0) -> tuple[float, float]:
+    """Return (cost_usd_with_markup, est_minutes) — pure math, no GCS needed."""
+    crop_factor = (crop / 160) ** _W3D_CROP_EXP
+    w3d = (_W3D_BASE + refine * _W3D_REFINE_STEP) * crop_factor
+    if wonder3d_mode == "float16":
+        w3d *= _FLOAT16_SPEEDUP
+    mins = _STARTUP_MIN + w3d + _MESH_MIN
+    if upscale:
+        mins += _ESRGAN_MIN
+    if restormer_tasks:
+        mins += restormer_tasks * _RESTORMER_PER_TASK
+    raw_cost = _CLOUD_COST_PER_HOUR.get(gpu_type, 1.37) * (mins / 60.0)
+    cost = round(raw_cost * (1 + _SERVICE_MARKUP), 4)
+    return cost, round(mins, 1)
+
+
+def _read_print_cost(paths: list) -> dict | None:
+    """Search directories of result paths for a mesh report and return its print_cost dict."""
+    import json
+    seen = set()
+    for p in paths:
+        d = os.path.dirname(os.path.abspath(p))
+        if d in seen:
+            continue
+        seen.add(d)
+        try:
+            for f in os.listdir(d):
+                if f.endswith("_mesh_report.json"):
+                    with open(os.path.join(d, f)) as fh:
+                        return json.load(fh).get("print_cost")
+        except Exception:
+            pass
+    return None
 
 _VERTEX_STATE_LABELS = {
     "JOB_STATE_PENDING":   ("Starting - pulling container image...", CYAN),
@@ -30,6 +79,8 @@ _VERTEX_STATE_LABELS = {
 
 def _model_label(path: str) -> str:
     name = os.path.basename(path)
+    if "_print" in name.lower() or name.lower().endswith(".stl"):
+        return "Print-Ready"
     if "lowpoly" in name.lower():
         return "Optimized"
     if name.lower().startswith("model"):
@@ -46,17 +97,21 @@ class PipelineScreen(QWidget):
     def __init__(self, run_mode: str = "local", credentials=None,
                  user_info: dict = None, parent=None):
         super().__init__(parent)
-        self.run_mode    = run_mode
-        self.credentials = credentials
-        self.user_info   = user_info or {}
-        self.base_dir    = os.path.dirname(os.path.abspath(__file__))
-        self.project_dir = os.path.abspath(os.path.join(self.base_dir, "..", ".."))
+        self.run_mode             = run_mode
+        self.credentials          = credentials
+        self.user_info            = user_info or {}
+        self.base_dir             = os.path.dirname(os.path.abspath(__file__))
+        self.project_dir          = os.path.abspath(os.path.join(self.base_dir, "..", ".."))
+        self._last_budget_summary = None
 
         # Vertex AI polling
         self._vertex_job        = None
         self._poll_timer        = QTimer(self)
         self._poll_fast_ticks   = 0
         self._last_vertex_state = ""
+        self._last_cloud_step   = -1   # tracks GCS progress, reset per job
+        self._poll_vertex_active = False   # re-entry guard
+        self._poll_queue_active  = False   # re-entry guard
         self._poll_timer.timeout.connect(self._poll_vertex_job)
 
         # Drive state - shared between local and cloud modes
@@ -127,6 +182,8 @@ class PipelineScreen(QWidget):
         self.left.image_loaded.connect(
             lambda p: self._log(f"[INPUT] Loaded: {os.path.basename(p)}")
         )
+        if self.run_mode == "remote":
+            self.left.settings_changed.connect(self._update_cost_estimate)
         self.center.upload_to_drive_requested.connect(self._save_to_drive)
         self.center.cancel_requested.connect(self._cancel_pipeline)
         self.right.cleared.connect(self._on_viewer_cleared)
@@ -262,7 +319,7 @@ class PipelineScreen(QWidget):
         self.center.set_drive_state("connecting")
         self._log("[DRIVE] Authenticating with Google Drive...")
 
-        self._drive_auth_thread = QThread()
+        self._drive_auth_thread = QThread(self)
         self._drive_auth_worker = DriveAuthWorker(secrets_path, token_path)
         self._drive_auth_worker.moveToThread(self._drive_auth_thread)
 
@@ -271,6 +328,8 @@ class PipelineScreen(QWidget):
         self._drive_auth_worker.error.connect(self._on_drive_connect_error)
         self._drive_auth_worker.success.connect(self._drive_auth_thread.quit)
         self._drive_auth_worker.error.connect(self._drive_auth_thread.quit)
+        self._drive_auth_thread.finished.connect(self._drive_auth_thread.deleteLater)
+        self._drive_auth_thread.finished.connect(self._drive_auth_worker.deleteLater)
 
         self._drive_auth_thread.start()
 
@@ -314,7 +373,7 @@ class PipelineScreen(QWidget):
 
         name_no_ext    = os.path.splitext(os.path.basename(self.left.image_path))[0]
         self._job_name = f"{name_no_ext}_{datetime.now().strftime('%Y-%m-%d_%H%M%S')}"
-        self.center.set_all_steps(IDLE)
+        self.center.configure_for_run(settings.get("upscale", False))
 
         # Reset Drive section: keep auth state but clear upload affordance
         if self._drive_creds:
@@ -356,7 +415,7 @@ class PipelineScreen(QWidget):
             self._cleanup_gcs_inputs()
             self.center.show_cancel_button(False)
             self.center.set_cancel_label("Cancel Job")
-            self.center.set_all_steps(ERROR)
+            self.center.mark_failed()
             self._on_pipeline_done(success=False)
             return
 
@@ -381,7 +440,7 @@ class PipelineScreen(QWidget):
 
         self.center.show_cancel_button(False)
         self.center.set_cancel_label("Cancel Job")
-        self.center.set_all_steps(ERROR)
+        self.center.mark_failed()
         self._on_pipeline_done(success=False)
 
     # Local - Docker
@@ -390,7 +449,7 @@ class PipelineScreen(QWidget):
         self._log("[LOCAL] Checking Docker image...")
         self.center.set_job_status("Checking Docker image...", CYAN)
 
-        self._docker_build_thread = QThread()
+        self._docker_build_thread = QThread(self)
         self._docker_build_worker = DockerBuildWorker(self.project_dir)
         self._docker_build_worker.moveToThread(self._docker_build_thread)
 
@@ -400,6 +459,8 @@ class PipelineScreen(QWidget):
             lambda ok: self._on_build_done(ok, settings)
         )
         self._docker_build_worker.finished.connect(self._docker_build_thread.quit)
+        self._docker_build_thread.finished.connect(self._docker_build_thread.deleteLater)
+        self._docker_build_thread.finished.connect(self._docker_build_worker.deleteLater)
 
         self._docker_build_thread.start()
 
@@ -407,20 +468,22 @@ class PipelineScreen(QWidget):
         if not success:
             self._log("[LOCAL] Docker image build/check failed.", NEON_ORANGE)
             self.notification.emit(
-                "Neural Forge - Local",
+                "Photo2Solid - Local",
                 "Docker image build failed. Check the log for details."
             )
             self._on_pipeline_done(success=False)
             return
 
         output_dir = os.path.join(
-            os.path.expanduser("~"), "Downloads", "NeuralForge", self._job_name
+            os.path.expanduser("~"), "Downloads", "Photo2Solid", self._job_name
         )
         self._log(f"[LOCAL] Starting pipeline - output: {output_dir}")
         self.center.set_job_status("Running pipeline...", CYAN)
-        self.center.set_all_steps(RUNNING)
+        # Activate only the first step; others advance one-by-one as each finishes
+        first_active = 0 if settings.get("upscale") else 1
+        self.center.set_step_state(first_active, RUNNING)
 
-        self._docker_run_thread = QThread()
+        self._docker_run_thread = QThread(self)
         self._docker_run_worker = DockerRunWorker(
             image_path=self.left.image_path,
             output_dir=output_dir,
@@ -430,11 +493,11 @@ class PipelineScreen(QWidget):
 
         self._docker_run_thread.started.connect(self._docker_run_worker.run)
         self._docker_run_worker.log.connect(self._log)
-        self._docker_run_worker.step_done.connect(
-            lambda idx: self.center.set_step_state(idx, DONE)
-        )
+        self._docker_run_worker.step_done.connect(self.center.advance_step)
         self._docker_run_worker.finished.connect(self._on_docker_run_done)
         self._docker_run_worker.finished.connect(self._docker_run_thread.quit)
+        self._docker_run_thread.finished.connect(self._docker_run_thread.deleteLater)
+        self._docker_run_thread.finished.connect(self._docker_run_worker.deleteLater)
 
         self._docker_run_thread.start()
         self._input_basename = os.path.basename(self.left.image_path)
@@ -442,16 +505,20 @@ class PipelineScreen(QWidget):
     def _on_docker_run_done(self, success: bool):
         if success:
             output_dir = os.path.join(
-                os.path.expanduser("~"), "Downloads", "NeuralForge", self._job_name
+                os.path.expanduser("~"), "Downloads", "Photo2Solid", self._job_name
             )
             self._result_paths = self._collect_results(output_dir)
             self._log(f"[OUTPUT] Found {len(self._result_paths)} result file(s).")
+            self.center.set_all_active_steps(DONE)
         self._on_pipeline_done(success=success)
 
     # Cloud - Vertex AI
 
     def _run_cloud(self, restormer_tasks, wonder3d_mode, crop, refine,
-                   faces, stages, mesh_optimize, print_mode):
+                   faces, stages, mesh_optimize, print_mode,
+                   lod_watertight=False,
+                   print_size=100, print_filament_cost=65, print_infill=20,
+                   upscale=False):
         """
         Phase 1: upload the image and join the queue.
         Actual job submission happens in _submit_vertex_job() once it's our turn.
@@ -483,7 +550,9 @@ class PipelineScreen(QWidget):
 
             # Pre-flight budget check before uploading anything
             allowed, cost, remaining = budget.can_submit(
-                gpu_type, refine, wonder3d_mode, crop=crop
+                gpu_type, refine, wonder3d_mode, crop=crop,
+                upscale=upscale,
+                restormer_tasks=len(restormer_tasks.split(",")) if restormer_tasks else 0,
             )
             if not allowed:
                 raise RuntimeError(
@@ -505,13 +574,19 @@ class PipelineScreen(QWidget):
                 "crop_size":       crop,
                 "refine":          refine,
                 "mesh_faces":      faces,
-                "mesh_stages":     stages,
-                "mesh_optimize":   mesh_optimize,
-                "mesh_intermediate": stages > 1,
-                "wonder3d_mode":   wonder3d_mode,
-                "restormer_tasks": restormer_tasks,
-                "budget_manager":  budget,
-                "gpu_type":        gpu_type,
+                "mesh_stages":        stages,
+                "mesh_optimize":      mesh_optimize,
+                "mesh_intermediate":  stages > 1,
+                "lod_watertight":     lod_watertight,
+                "print_mode":         print_mode,
+                "print_size":         print_size,
+                "print_filament_cost": print_filament_cost,
+                "print_infill":        print_infill,
+                "wonder3d_mode":      wonder3d_mode,
+                "restormer_tasks":    restormer_tasks,
+                "upscale":            upscale,
+                "budget_manager":     budget,
+                "gpu_type":           gpu_type,
             }
 
             # Join the queue
@@ -544,6 +619,9 @@ class PipelineScreen(QWidget):
         """Timer callback: check our position, submit when we're first and slot is free."""
         if not self._job_queue or not self._queue_entry_id:
             return
+        if self._poll_queue_active:
+            return
+        self._poll_queue_active = True
         try:
             position, total = self._job_queue.my_position(self._queue_entry_id)
 
@@ -573,6 +651,8 @@ class PipelineScreen(QWidget):
 
         except Exception as e:
             self._log(f"[QUEUE ERROR] {e}", NEON_ORANGE)
+        finally:
+            self._poll_queue_active = False
 
     def _submit_vertex_job(self):
         """Phase 2: submit the Vertex AI job now that we hold the GPU lock."""
@@ -581,18 +661,24 @@ class PipelineScreen(QWidget):
             manager = self.credentials
 
             self._vertex_job = manager.launch_vertex_job(
-                image_uri=      p["image_uri"],
-                input_uri=      p["input_uri"],
-                crop_size=      p["crop_size"],
-                refine=         p["refine"],
-                mesh_faces=     p["mesh_faces"],
-                mesh_stages=    p["mesh_stages"],
-                mesh_optimize=  p["mesh_optimize"],
-                mesh_intermediate= p["mesh_intermediate"],
-                wonder3d_mode=  p["wonder3d_mode"],
-                restormer_tasks=p["restormer_tasks"],
-                gpu_type=       p.get("gpu_type", "L4"),
-                budget_manager= p["budget_manager"],
+                image_uri=           p["image_uri"],
+                input_uri=           p["input_uri"],
+                crop_size=           p["crop_size"],
+                refine=              p["refine"],
+                mesh_faces=          p["mesh_faces"],
+                mesh_stages=         p["mesh_stages"],
+                mesh_optimize=       p["mesh_optimize"],
+                mesh_intermediate=   p["mesh_intermediate"],
+                mesh_lod_watertight= p.get("lod_watertight", False),
+                mesh_print=          p.get("print_mode", False),
+                mesh_size=           p.get("print_size", 100),
+                mesh_filament_cost=  p.get("print_filament_cost", 65),
+                mesh_infill=         p.get("print_infill", 20) / 100.0,
+                wonder3d_mode=       p["wonder3d_mode"],
+                restormer_tasks=     p["restormer_tasks"],
+                upscale=             p.get("upscale", False),
+                gpu_type=            p.get("gpu_type", "L4"),
+                budget_manager=      p["budget_manager"],
             )
 
             # Store job name in the lock blob so other clients can see who is running
@@ -600,7 +686,7 @@ class PipelineScreen(QWidget):
             self._job_queue.update_lock_job_name(job_id)
 
             self._log(f"[CLOUD] Job submitted: {job_id}")
-            self._log(f"[CLOUD] Results folder: ~/Downloads/NeuralForge/{self._job_name}/")
+            self._log(f"[CLOUD] Results folder: ~/Downloads/Photo2Solid/{self._job_name}/")
             if manager._persistent_resource_id:
                 self._log(
                     "[CLOUD] GPU cluster is ready. Pulling container image - "
@@ -611,10 +697,12 @@ class PipelineScreen(QWidget):
                 self._log("[CLOUD] VM is provisioning - GPU allocation may take 2–5 minutes.", CYAN)
                 self.center.set_job_status("Waiting for GPU allocation...", CYAN)
             self.center.set_job_id(self._vertex_job.resource_name)
-            self.center.set_all_steps(RUNNING)
+            self._last_cloud_step = -1
+            first_active = 0 if p.get("upscale") else 1
+            self.center.set_step_state(first_active, RUNNING)
 
             self.notification.emit(
-                "Neural Forge - Cloud",
+                "Photo2Solid - Cloud",
                 "Job submitted to GPU. Pipeline is starting..."
             )
 
@@ -659,7 +747,7 @@ class PipelineScreen(QWidget):
         if not email:
             return
 
-        self._budget_thread = QThread()
+        self._budget_thread = QThread(self)
         self._budget_worker = BudgetFetchWorker(self.credentials, email)
         self._budget_worker.moveToThread(self._budget_thread)
 
@@ -668,15 +756,44 @@ class PipelineScreen(QWidget):
         self._budget_worker.error.connect(self._on_budget_error)
         self._budget_worker.finished.connect(self._budget_thread.quit)
         self._budget_worker.error.connect(self._budget_thread.quit)
+        self._budget_thread.finished.connect(self._budget_thread.deleteLater)
+        self._budget_thread.finished.connect(self._budget_worker.deleteLater)
 
         self._budget_thread.start()
 
     def _on_budget_fetched(self, summary: dict):
+        self._last_budget_summary = summary
         self.left.set_budget(
             spent=summary["spent_usd"],
             limit=summary["monthly_limit_usd"],
             jobs=summary["jobs_count"],
         )
+        self._update_cost_estimate()
+
+    def _update_cost_estimate(self):
+        """Recompute and display the estimated cost for the current UI settings."""
+        if self.run_mode != "remote" or not self.credentials:
+            return
+        summary = getattr(self, "_last_budget_summary", None)
+        if not summary:
+            return
+        s = self.left.get_settings()
+        gpu_type = "L4"
+        try:
+            if getattr(self.credentials, "_persistent_resource_id", None):
+                gpu_type = getattr(self.credentials, "_persistent_gpu_type", "L4") or "L4"
+        except Exception:
+            pass
+        cost, est_min = _cloud_estimate(
+            gpu_type,
+            refine=s.get("refine", 0),
+            crop=s.get("crop", 160),
+            wonder3d_mode=s.get("wonder3d_mode", "official"),
+            upscale=s.get("upscale", False),
+            restormer_tasks=len(s.get("restormer_tasks","").split(",")) if s.get("restormer_tasks") else 0,
+        )
+        remaining = summary.get("remaining_usd", 0.0)
+        self.left.set_estimate(cost, est_min, affordable=remaining >= cost)
 
     def _on_budget_error(self, message: str):
         if "insufficient authentication scopes" in message.lower() or "403" in message:
@@ -693,6 +810,9 @@ class PipelineScreen(QWidget):
         if not self._vertex_job:
             self._poll_timer.stop()
             return
+        if self._poll_vertex_active:
+            return
+        self._poll_vertex_active = True
         try:
             self._vertex_job.refresh()
             state = self._vertex_job.state.name
@@ -706,7 +826,7 @@ class PipelineScreen(QWidget):
                 if state == "JOB_STATE_RUNNING":
                     self._poll_timer.setInterval(30_000)
                     self.notification.emit(
-                        "Neural Forge - Cloud",
+                        "Photo2Solid - Cloud",
                         "GPU is running! Pipeline has started."
                     )
             else:
@@ -720,9 +840,19 @@ class PipelineScreen(QWidget):
                 elif self._poll_fast_ticks == 19:
                     self._poll_timer.setInterval(30_000)
 
+            # GCS per-step progress (RUNNING state only - container hasn't started yet otherwise)
+            if state == "JOB_STATE_RUNNING":
+                try:
+                    gcs_step = self.credentials.get_pipeline_progress()
+                    while self._last_cloud_step < gcs_step:
+                        self._last_cloud_step += 1
+                        self.center.advance_step(self._last_cloud_step)
+                except Exception:
+                    pass
+
             if state == "JOB_STATE_SUCCEEDED":
                 self._poll_timer.stop()
-                self.center.set_all_steps(DONE)
+                self.center.set_all_active_steps(DONE)
                 self._log("[CLOUD] Job succeeded!", NEON_GREEN)
                 self._cleanup_gcs_inputs()
                 if self._holds_lock and self._job_queue:
@@ -731,7 +861,7 @@ class PipelineScreen(QWidget):
                 self._start_gcs_download()
             elif state in VERTEX_DONE_STATES:
                 self._poll_timer.stop()
-                self.center.set_all_steps(ERROR)
+                self.center.mark_failed()
                 self._log(f"[CLOUD] Job ended: {state}", NEON_ORANGE)
                 err_msg = self._vertex_job.error_message
                 if err_msg:
@@ -744,17 +874,19 @@ class PipelineScreen(QWidget):
 
         except Exception as e:
             self._log(f"[POLL ERROR] {e}", NEON_ORANGE)
+        finally:
+            self._poll_vertex_active = False
 
     # GCS download
 
     def _start_gcs_download(self):
         local_dir = os.path.join(
-            os.path.expanduser("~"), "Downloads", "NeuralForge", self._job_name
+            os.path.expanduser("~"), "Downloads", "Photo2Solid", self._job_name
         )
         self._log(f"[GCS] Downloading results to {local_dir}...")
         self.center.set_job_status("Downloading results from GCS...", CYAN)
 
-        self._gcs_thread = QThread()
+        self._gcs_thread = QThread(self)
         self._gcs_worker = GCSDownloadWorker(self.credentials, local_dir)
         self._gcs_worker.moveToThread(self._gcs_thread)
 
@@ -763,6 +895,8 @@ class PipelineScreen(QWidget):
         self._gcs_worker.error.connect(self._on_gcs_download_error)
         self._gcs_worker.finished.connect(self._gcs_thread.quit)
         self._gcs_worker.error.connect(self._gcs_thread.quit)
+        self._gcs_thread.finished.connect(self._gcs_thread.deleteLater)
+        self._gcs_thread.finished.connect(self._gcs_worker.deleteLater)
 
         self._gcs_thread.start()
 
@@ -809,14 +943,15 @@ class PipelineScreen(QWidget):
 
             if self._result_paths:
                 self._load_results_into_viewer(self._result_paths)
+                self.right.show_print_cost(_read_print_cost(self._result_paths))
 
                 if self._drive_creds:
                     self.center.set_drive_state("ready", n_files=len(self._result_paths))
                 # If no Drive creds: keep current state (connect or connected)
 
             self.notification.emit(
-                "Neural Forge - Done",
-                f"Pipeline complete! {len(self._result_paths)} file(s) saved to Downloads/NeuralForge."
+                "Photo2Solid - Done",
+                f"Pipeline complete! {len(self._result_paths)} file(s) saved to Downloads/Photo2Solid."
             )
         else:
             self._log("[PIPELINE] Failed or cancelled.", NEON_ORANGE)
@@ -842,10 +977,10 @@ class PipelineScreen(QWidget):
     def _load_results_from_history(self, paths: list):
         self._result_paths = paths
 
-        # Extract job name: find the first path component under ~/Downloads/NeuralForge/
+        # Extract job name: find the first path component under ~/Downloads/Photo2Solid/
         if paths:
             neuralforge = os.path.normpath(
-                os.path.join(os.path.expanduser("~"), "Downloads", "NeuralForge")
+                os.path.join(os.path.expanduser("~"), "Downloads", "Photo2Solid")
             )
             for p in paths:
                 norm = os.path.normpath(p)
@@ -857,6 +992,7 @@ class PipelineScreen(QWidget):
 
         self.right.clear_models()
         self._load_results_into_viewer(paths)
+        self.right.show_print_cost(_read_print_cost(paths))
 
         if self._drive_creds:
             self.center.set_drive_state("ready", n_files=len(paths))
@@ -909,9 +1045,9 @@ class PipelineScreen(QWidget):
         self.center.set_drive_state("uploading")
 
         job_name = self._job_name or "results"
-        self._log(f"[DRIVE] Uploading {len(self._result_paths)} file(s) -> Neural Forge/{job_name}/")
+        self._log(f"[DRIVE] Uploading {len(self._result_paths)} file(s) -> Photo2Solid/{job_name}/")
 
-        self._drive_thread = QThread()
+        self._drive_thread = QThread(self)
         self._drive_worker = DriveWorker(self._drive_creds, self._result_paths, job_name)
         self._drive_worker.moveToThread(self._drive_thread)
 
@@ -923,20 +1059,22 @@ class PipelineScreen(QWidget):
         self._drive_worker.error.connect(self._on_drive_error)
         self._drive_worker.finished.connect(self._drive_thread.quit)
         self._drive_worker.error.connect(self._drive_thread.quit)
+        self._drive_thread.finished.connect(self._drive_thread.deleteLater)
+        self._drive_thread.finished.connect(self._drive_worker.deleteLater)
 
         self._drive_thread.start()
 
     def _on_drive_done(self, uploaded: list):
         job_name = self._job_name or "results"
         self._log(
-            f"[DRIVE] {len(uploaded)} file(s) saved to Neural Forge/{job_name}/",
+            f"[DRIVE] {len(uploaded)} file(s) saved to Photo2Solid/{job_name}/",
             NEON_GREEN,
         )
         self.center.set_drive_state("done")
         self.center.set_job_status("Saved to Drive", NEON_GREEN)
         self.notification.emit(
-            "Neural Forge - Drive",
-            f"Files saved to Google Drive: Neural Forge/{job_name}/"
+            "Photo2Solid - Drive",
+            f"Files saved to Google Drive: Photo2Solid/{job_name}/"
         )
     def _on_drive_error(self, message: str):
         display = message.strip() if message else "(unknown error - check terminal for traceback)"

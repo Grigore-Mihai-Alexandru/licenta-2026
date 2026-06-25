@@ -1,11 +1,15 @@
 import os
 
-from PySide6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QSizePolicy
+from PySide6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QSizePolicy, QFrame, QLabel
 from PySide6.QtWebEngineWidgets import QWebEngineView
-from PySide6.QtWebEngineCore import QWebEngineSettings
+from PySide6.QtWebEngineCore import QWebEngineSettings, QWebEnginePage
 from PySide6.QtCore import Qt, QUrl, Signal
 
-from ui.styles.theme import BG_DEEP, TEXT_MUTED, TEXT_SECONDARY, NEON_ORANGE, BORDER_BRIGHT
+from ui.styles.theme import (
+    BG_DEEP, BG_ELEVATED,
+    TEXT_MUTED, TEXT_SECONDARY,
+    NEON_ORANGE, BORDER, BORDER_BRIGHT, CYAN,
+)
 from ui.components.pipeline.helpers import section_label, card
 
 
@@ -22,25 +26,63 @@ class RightPanel(QWidget):
 
     # -- Public API ------------------------------------------------------------
 
+    # -- Lifecycle -----------------------------------------------------------------
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        try:
+            self.web_view.page().setLifecycleState(QWebEnginePage.LifecycleState.Active)
+        except Exception:
+            pass
+
+    def hideEvent(self, event):
+        super().hideEvent(event)
+        # Freeze Chromium rendering so two hidden instances don't conflict.
+        try:
+            self.web_view.page().setLifecycleState(QWebEnginePage.LifecycleState.Frozen)
+        except Exception:
+            pass
+
+    def _js(self, script: str):
+        """Run JavaScript, resuming the page first if it was frozen."""
+        try:
+            page = self.web_view.page()
+            if page.lifecycleState() != QWebEnginePage.LifecycleState.Active:
+                page.setLifecycleState(QWebEnginePage.LifecycleState.Active)
+            page.runJavaScript(script)
+        except Exception:
+            pass
+
+    # -- Public API ------------------------------------------------------------
+
     def add_model(self, path: str, label: str = None):
         """Add a model to the viewer (shows a toggle button in the sidebar)."""
         file_url = QUrl.fromLocalFile(os.path.abspath(path)).toString()
         label    = (label or os.path.basename(path)).replace("'", "")
-        self.web_view.page().runJavaScript(
-            f"window.addModel('{file_url}', '{label}')"
-        )
+        self._js(f"window.addModel('{file_url}', '{label}')")
 
     def load_model(self, path: str, label: str = None):
         """Load a single model, clearing any previously loaded models."""
         file_url = QUrl.fromLocalFile(os.path.abspath(path)).toString()
         label    = (label or os.path.basename(path)).replace("'", "")
-        self.web_view.page().runJavaScript(
-            f"window.loadModel('{file_url}', '{label}')"
-        )
+        self._js(f"window.loadModel('{file_url}', '{label}')")
 
     def clear_models(self):
-        self.web_view.page().runJavaScript("window.clearModels()")
+        self._js("window.clearModels()")
+        self._cost_bar.setVisible(False)
         self.cleared.emit()
+
+    def show_print_cost(self, data: dict):
+        """Show or hide the print estimate bar below the viewer."""
+        if not data:
+            self._cost_bar.setVisible(False)
+            return
+        weight = data.get("estimated_weight_g", 0)
+        infill = data.get("infill_pct", 20)
+        cost   = data.get("estimated_cost_eur", data.get("estimated_cost_ron", 0))
+        self._cost_weight_lbl.setText(f"~{weight}g PLA - {infill}% infill")
+        self._cost_price_lbl.setText(f"≈ {cost:.2f} RON")
+        self._cost_bar.setVisible(True)
 
     # -- Build -----------------------------------------------------------------
 
@@ -95,6 +137,54 @@ class RightPanel(QWidget):
 
         vlay.addWidget(self.web_view)
         layout.addWidget(viewer_frame, 1)
+
+        self._cost_bar = self._build_cost_bar()
+        layout.addWidget(self._cost_bar)
+        self._cost_bar.setVisible(False)
+
+    def _build_cost_bar(self) -> QFrame:
+        bar = QFrame()
+        bar.setStyleSheet(f"""
+            QFrame {{
+                background: {BG_ELEVATED};
+                border: 1px solid {BORDER_BRIGHT};
+                border-radius: 8px;
+            }}
+        """)
+        row = QHBoxLayout(bar)
+        row.setContentsMargins(14, 9, 14, 9)
+        row.setSpacing(0)
+
+        tag = QLabel("PRINT ESTIMATE")
+        tag.setStyleSheet(
+            f"color: {CYAN}; font-size: 11px; letter-spacing: 2px; "
+            f"font-weight: bold; background: transparent; border: none;"
+        )
+        row.addWidget(tag)
+
+        row.addSpacing(14)
+        sep = QFrame()
+        sep.setFrameShape(QFrame.VLine)
+        sep.setFixedWidth(1)
+        sep.setStyleSheet(f"background: {BORDER_BRIGHT}; border: none;")
+        row.addWidget(sep)
+        row.addSpacing(14)
+
+        self._cost_weight_lbl = QLabel("—")
+        self._cost_weight_lbl.setStyleSheet(
+            f"color: {TEXT_SECONDARY}; font-size: 13px; background: transparent; border: none;"
+        )
+        row.addWidget(self._cost_weight_lbl)
+
+        row.addStretch()
+
+        self._cost_price_lbl = QLabel("—")
+        self._cost_price_lbl.setStyleSheet(
+            f"color: {CYAN}; font-size: 15px; font-weight: bold; background: transparent; border: none;"
+        )
+        row.addWidget(self._cost_price_lbl)
+
+        return bar
 
     def _placeholder(self) -> str:
         return (

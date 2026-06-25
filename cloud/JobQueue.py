@@ -1,5 +1,5 @@
 """
-GCS-backed FIFO job queue for the Neural Forge GPU pipeline.
+GCS-backed FIFO job queue for the Photo2Solid GPU pipeline.
 
 Structure inside the bucket:
     queue/entries/<timestamp_ms>_<user_prefix>.json   - one blob per waiting user

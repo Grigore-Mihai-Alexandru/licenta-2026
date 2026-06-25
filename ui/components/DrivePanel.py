@@ -67,10 +67,10 @@ class DrivePanel(QWidget):
       1. After a job finishes, call set_result_paths(paths) with
          the local file paths produced by the pipeline.
       2. The user clicks 'Upload to Drive' - files go to the
-         'Neural Forge' folder in their Drive.
+         'Photo2Solid' folder in their Drive.
       3. The user optionally clicks 'Download to PC' to save
          the same files to a local directory they choose.
-      4. 'Open in Drive' opens the Neural Forge folder in the browser.
+      4. 'Open in Drive' opens the Photo2Solid folder in the browser.
     """
 
     def __init__(self, drive_manager: DriveManager, parent=None):
@@ -125,7 +125,7 @@ class DrivePanel(QWidget):
 
         self._btn_upload = QPushButton("Upload to Drive")
         self._btn_upload.setEnabled(False)
-        self._btn_upload.setToolTip("Upload pipeline results to your Neural Forge folder in Google Drive")
+        self._btn_upload.setToolTip("Upload pipeline results to your Photo2Solid folder in Google Drive")
         self._btn_upload.clicked.connect(self._start_upload)
         btn_row.addWidget(self._btn_upload)
 
@@ -136,7 +136,7 @@ class DrivePanel(QWidget):
         btn_row.addWidget(self._btn_download)
 
         self._btn_open_drive = QPushButton("Open in Drive")
-        self._btn_open_drive.setToolTip("Open the Neural Forge folder in your browser")
+        self._btn_open_drive.setToolTip("Open the Photo2Solid folder in your browser")
         self._btn_open_drive.clicked.connect(self._open_drive)
         btn_row.addWidget(self._btn_open_drive)
 
@@ -177,7 +177,7 @@ class DrivePanel(QWidget):
         self._bar.show()
         self._lbl_status.setText("Uploading...")
 
-        self._thread = QThread()
+        self._thread = QThread(self)
         self._worker = UploadWorker(self._manager, self._result_paths)
         self._worker.moveToThread(self._thread)
 
@@ -187,6 +187,8 @@ class DrivePanel(QWidget):
         self._worker.error.connect(self._on_error)
         self._worker.finished.connect(self._thread.quit)
         self._worker.error.connect(self._thread.quit)
+        self._thread.finished.connect(self._thread.deleteLater)
+        self._thread.finished.connect(self._worker.deleteLater)
 
         self._thread.start()
 
@@ -218,7 +220,7 @@ class DrivePanel(QWidget):
         self._bar.show()
         self._lbl_status.setText("Downloading...")
 
-        self._thread = QThread()
+        self._thread = QThread(self)
         self._worker = DownloadWorker(self._manager, self._uploaded, dest_dir)
         self._worker.moveToThread(self._thread)
 
@@ -228,6 +230,8 @@ class DrivePanel(QWidget):
         self._worker.error.connect(self._on_error)
         self._worker.finished.connect(self._thread.quit)
         self._worker.error.connect(self._thread.quit)
+        self._thread.finished.connect(self._thread.deleteLater)
+        self._thread.finished.connect(self._worker.deleteLater)
 
         self._thread.start()
 

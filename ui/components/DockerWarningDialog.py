@@ -124,7 +124,7 @@ class DockerStartDialog(QDialog):
                 "Docker Desktop was not found on this machine.\n\n"
                 "Please install Docker Desktop from:\n"
                 "  https://www.docker.com/products/docker-desktop\n\n"
-                "After installing, restart Neural Forge and try again."
+                "After installing, restart Photo2Solid and try again."
             )
             body.setWordWrap(True)
             body.setTextInteractionFlags(Qt.TextSelectableByMouse)
@@ -132,7 +132,7 @@ class DockerStartDialog(QDialog):
             root.addWidget(body)
         else:
             body = QLabel(
-                "Neural Forge detected that Docker Desktop is installed\n"
+                "Photo2Solid detected that Docker Desktop is installed\n"
                 "but the daemon is not running.\n\n"
                 "Click  Start Docker Desktop  below, wait ~20 seconds for\n"
                 "it to initialise, then this dialog will close automatically."
@@ -167,7 +167,7 @@ class DockerStartDialog(QDialog):
         if not self._docker_missing:
             docker_path = find_docker_desktop()
             self._btn_start = QPushButton("Start Docker Desktop")
-            self._btn_start.setFixedWidth(180)
+            self._btn_start.setFixedWidth(240)
             self._btn_start.setStyleSheet(f"""
                 QPushButton {{
                     background: {CYAN}22; border: 1px solid {CYAN}88;
@@ -227,7 +227,7 @@ class DockerWarningDialog(QDialog):
         super().__init__(parent)
         self._settings = settings
         self.setWindowTitle("Local Mode  -  Prerequisites")
-        self.setFixedWidth(480)
+        self.setFixedWidth(600)
         self.setModal(True)
         self._build_ui()
 
@@ -270,12 +270,12 @@ class DockerWarningDialog(QDialog):
         btn_row.addStretch()
 
         self._btn_cancel = QPushButton("Cancel")
-        self._btn_cancel.setFixedWidth(90)
+        self._btn_cancel.setFixedWidth(120)
         self._btn_cancel.clicked.connect(self.reject)
         btn_row.addWidget(self._btn_cancel)
 
         self._btn_continue = QPushButton("Continue to Local")
-        self._btn_continue.setFixedWidth(140)
+        self._btn_continue.setFixedWidth(240)
         self._btn_continue.setDefault(True)
         self._btn_continue.clicked.connect(self._on_continue)
         btn_row.addWidget(self._btn_continue)

@@ -35,6 +35,15 @@ RUN /opt/venv_restormer/bin/pip install --upgrade pip setuptools wheel && \
 RUN git clone https://github.com/swz30/Restormer.git /app/Restormer && \
     cd /app/Restormer && /opt/venv_restormer/bin/python setup.py develop --no_cuda_ext
 
+# -- Real-ESRGAN (same Python 3.7 venv - shares torch, cv2, numpy already installed) --
+RUN /opt/venv_restormer/bin/pip install basicsr realesrgan
+
+# Download Real-ESRGAN x4plus general-purpose weights (~67 MB)
+RUN mkdir -p /app/weights && \
+    wget -q --show-progress \
+        "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.1.0/RealESRGAN_x4plus.pth" \
+        -O /app/weights/RealESRGAN_x4plus.pth
+
 RUN mkdir -p \
         /app/Restormer/Denoising/pretrained_models \
         /app/Restormer/Motion_Deblurring/pretrained_models \
@@ -144,6 +153,7 @@ subprocess.run(['wget', 'https://dl.fbaipublicfiles.com/segment_anything/sam_vit
                 '-O', '/app/Wonder3D/sam_pt/sam_vit_h_4b8939.pth'])"
 
 # -- 4. PROJECT FILES ----------------------------------------------------------
+COPY assets/upscale_esrgan.py          /app/upscale_esrgan.py
 COPY assets/optimize_mesh.py          /app/utils/optimize_mesh.py
 
 # Both Wonder3D runners — chosen at runtime via --wonder3d_mode arg
